@@ -401,6 +401,18 @@ function dlLink(name, str) {
 }
 document.addEventListener('pointerdown', (e) => { if (!$('dl').hidden && !$('dl').parentElement.contains(e.target)) closeDl(); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('dl').hidden) closeDl(); });
+// copy a link to this session at the playhead (#sessionId@sec) — recipients see the same data in supabase/server mode
+$('share').onclick = async () => {
+  const s = pk.sessions[pk.cur], label = $('share-label');
+  if (!s || !S) return;
+  const say = (m) => { label.textContent = m; clearTimeout(say.t); say.t = setTimeout(() => (label.textContent = 'リンクをコピー'), 2000); };
+  if (s.source === 'file' || MODE === 'static') return say('このセッションは共有できません');
+  const url = location.href.split('#')[0] + '#' + encodeURIComponent(s.sessionId) + '@' + ((S.t - S.T0) / 1000).toFixed(1);
+  history.replaceState(null, '', url);
+  try { await navigator.clipboard.writeText(url); say('コピーしました'); }
+  catch { prompt('リンク', url); }
+};
+
 $('export').onclick = async () => {
   const btn = $('export'), label = $('export-label'), list = pk.sessions;
   closeDl();

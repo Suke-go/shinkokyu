@@ -162,6 +162,7 @@ window.addEventListener("beforeunload", (e) => {
 /* ---------- screens ---------- */
 const form = $("login-form");
 try { $("expId").value = localStorage.getItem("lastExpId") || ""; } catch { /* ignore */ }
+{ const q = new URLSearchParams(location.search).get("exp"); if (q) $("expId").value = q; } // shareable ?exp=<id>
 
 form.addEventListener("submit", async (ev) => {
   ev.preventDefault();

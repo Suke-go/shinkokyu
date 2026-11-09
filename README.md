@@ -26,4 +26,6 @@ node server/server.js          # http://127.0.0.1:8787  (LAN の別PCから使�
 1. Supabase の SQL Editor に [supabase/schema.sql](supabase/schema.sql) を貼って実行（何度実行しても安全）。
 2. Project URL（`https://xxxx.supabase.co`）を `public/shared/config.js` の `SUPABASE.url` に書く（publishable key は公開前提で入っている）。
 3. commit & push（Pages が再ビルド）。Node サーバが無い環境では自動で supabase モードになる。`?backend=static|server|supabase` で強制切替。
+- 共有: 被験者用は `experiment/?exp=<実験ID>` で実験IDが入った状態で開く。ダッシュボードの「リンクをコピー」で、そのセッションのその時点（`#<sessionId>@<秒>`）へのリンクをコピー。
+- 手元の記録（`data/*.json` やダウンロードした JSON）は `node tools/upload-supabase.mjs <file>...` で Supabase に移せる。
 - 注意: テスト段階の RLS は「publishable key を持つ誰でも全データ閲覧可」。実験本番の前に select を研究者(authenticated)に限定すること。
