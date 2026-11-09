@@ -143,7 +143,9 @@ try {
   // open redirect
   for (const p of ['//experiment', '///experiment', '/\\experiment']) {
     r = await call('GET', p);
-    assert.equal(r.headers.location, '/experiment/', p);
+    // POSIX treats "\" as a filename char → 404 (no redirect at all); Windows redirects. Either way never to "//host".
+    if (r.status === 404) assert.equal(r.headers.location, undefined, p);
+    else assert.equal(r.headers.location, '/experiment/', p);
   }
 
   // body limit (declared length is checked before reading)
