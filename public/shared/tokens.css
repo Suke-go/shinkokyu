@@ -1,0 +1,39 @@
+/* Shared design tokens — see SPEC.md §6. Both experiment and dashboard import this. */
+:root {
+  --bg: #EEF0F3;
+  --paper: #FFFFFF;
+  --ink: #1F2328;
+  --ink-2: #59636E;
+  --ink-3: #8C959F;
+  --line: #D8DEE4;
+  --line-2: #E8ECF0;
+  --accent: #2F5BD3;
+  --accent-soft: #E6ECFB;
+  --warn: #C2410C;
+  --warn-soft: #FCEBDD;
+  --ok: #1A7F37;
+
+  --font-body: "Yu Mincho", "YuMincho", "Hiragino Mincho ProN", "Noto Serif JP", serif;
+  --font-ui: "Segoe UI", "Hiragino Sans", "Yu Gothic UI", "Meiryo UI", system-ui, sans-serif;
+  --fs-ui: 13px;
+  --fs-body: 17px;
+  --lh-body: 1.9;
+
+  --r: 6px;
+  --shadow-paper: 0 1px 3px rgba(0,0,0,.08), 0 8px 24px rgba(0,0,0,.06);
+
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px; --s7: 48px;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: var(--fs-ui);
+  -webkit-font-smoothing: antialiased;
+}
+.num { font-variant-numeric: tabular-nums; }
+button { font: inherit; cursor: pointer; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>転記タイピング実験</title>
+<link rel="stylesheet" href="../shared/tokens.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<main id="s-login" class="screen center">
+  <form class="card" id="login-form" novalidate>
+    <h1>転記タイピング実験</h1>
+    <label for="expId">実験ID</label>
+    <input id="expId" name="expId" autocomplete="off" spellcheck="false" maxlength="64" required>
+    <label for="pid">参加者ID</label>
+    <input id="pid" name="pid" autocomplete="off" spellcheck="false" maxlength="64" required>
+    <p class="err" id="login-err" role="alert"></p>
+    <button class="btn primary" id="login-btn" type="submit">準備する</button>
+  </form>
+</main>
+
+<main id="s-ready" class="screen center" hidden>
+  <div class="card">
+    <h1 id="ready-title"></h1>
+    <ul class="instr">
+      <li>原文をそのまま右のページに入力してください。</li>
+      <li>書式設定はありません。</li>
+      <li>途中で手を止めても構いません。</li>
+    </ul>
+    <button class="btn primary big" id="start-btn" type="button">スタート</button>
+    <p class="sync-line" id="sync-line" role="status" aria-live="polite"></p>
+    <p class="err" id="ready-err" role="alert"></p>
+  </div>
+</main>
+
+<div id="s-task" class="task" hidden>
+  <header class="bar">
+    <div class="doc-title"><span id="doc-title"></span><small id="doc-pid"></small></div>
+    <div class="bar-right">
+      <button class="icon-btn" id="fs-btn" type="button" aria-label="全画面表示の切り替え" title="全画面表示の切り替え">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4"/></svg>
+      </button>
+      <button class="btn secondary" id="finish-btn" type="button">完了</button>
+    </div>
+  </header>
+
+  <div class="desk">
+    <section class="col">
+      <div class="cap">原文</div>
+      <div class="sheet src" id="src" tabindex="0" role="document" aria-label="原文"></div>
+    </section>
+    <section class="col">
+      <label class="cap" for="ed">入力</label>
+      <div class="sheet">
+        <textarea id="ed" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" aria-label="入力欄"></textarea>
+      </div>
+    </section>
+  </div>
+
+  <footer class="status num">
+    <span id="st-count"></span>
+    <span class="st-mid"><i class="dot" id="st-dot"></i></span>
+    <span id="st-lang" class="st-right"></span>
+  </footer>
+
+  <div class="scrim" id="confirm" hidden>
+    <div class="card dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-h">
+      <h2 id="confirm-h">入力を終了しますか？</h2>
+      <div class="row">
+        <button class="btn secondary" id="back-btn" type="button">戻る</button>
+        <button class="btn primary" id="end-btn" type="button">終了する</button>
+      </div>
+      <p class="sync-line" id="end-line" role="status" aria-live="polite"></p>
+    </div>
+  </div>
+</div>
+
+<main id="s-done" class="screen center" hidden>
+  <div class="card">
+    <h1>ご協力ありがとうございました</h1>
+    <p class="muted">この画面を閉じて構いません。</p>
+    <p class="muted small" id="done-id"></p>
+    <button class="btn" id="dl-btn" type="button" hidden>記録をもう一度ダウンロード</button>
+  </div>
+</main>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
