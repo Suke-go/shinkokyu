@@ -212,13 +212,13 @@ $("start-btn").addEventListener("click", async () => {
   const btn = $("start-btn"), line = $("sync-line");
   btn.disabled = true;
   try { await document.documentElement.requestFullscreen(); } catch { /* ignore */ }
-  if (!be.timeUrl) {
+  if (!be.timeUrl && !be.timeSource) {
     line.textContent = "時刻同期なし（静的版）";
     $("st-dot").className = "dot bad"; // amber
     $("st-dot").title = "時刻同期なし（静的版）";
   } else try {
     const s = await syncClock({
-      phase: "start", url: be.timeUrl,
+      phase: "start", url: be.timeUrl, ...be.timeSource,
       onProgress: (i, n) => { line.textContent = `時刻を同期しています ${i} / ${n}`; },
     });
     line.textContent = qualityText(s);
@@ -261,8 +261,8 @@ $("end-btn").addEventListener("click", async () => {
   active = false;
   line.textContent = "データを送信しています…";
   flush();
-  if (be.timeUrl) try {
-    const s = await syncClock({ phase: "end", url: be.timeUrl });
+  if (be.timeUrl || be.timeSource) try {
+    const s = await syncClock({ phase: "end", url: be.timeUrl, ...be.timeSource });
     await postRetry(s);
   } catch { /* end sync is best effort */ }
   const endedAt = Date.now();

@@ -1,17 +1,42 @@
 // Single seam for all storage/time I/O. MODE "server" = Node server /api; "static" = GitHub Pages
 // (experiments from ../data, sessions in this browser's IndexedDB + bundled ../data/index.json).
-// A third mode (supabase) would add one more branch per function.
+// "supabase" = Supabase PostgREST (plain fetch, see supabase/schema.sql); chosen when config.js has a url and no /api server answers.
+import { SUPABASE } from "./config.js";
 
-const q = new URLSearchParams(location.search).get("backend");
+const params = new URLSearchParams(location.search);
+const q = params.get("backend");
+const local = ["localhost", "127.0.0.1"].includes(location.hostname);
+const SB_URL = ((local && params.get("sburl")) || SUPABASE.url || "").replace(/\/+$/, ""); // ?sburl= is a localhost-only dev override
 export const MODE = await (async () => {
-  if (q === "static" || q === "server") return q;
+  if (q === "static" || q === "server" || (q === "supabase" && SB_URL)) return q;
   try {
     const r = await fetch("/api/time", { cache: "no-store" });
     if (r.ok && Number.isFinite((await r.json()).t1)) return "server";
   } catch { /* no server */ }
-  return "static";
+  return SB_URL ? "supabase" : "static";
 })();
 export const timeUrl = MODE === "server" ? "/api/time" : null;
+
+/* ---------- Supabase (PostgREST) ---------- */
+// Per https://supabase.com/docs/guides/api/api-keys: sb_publishable_ keys are not JWTs and go in the `apikey`
+// header only, "not on Authorization: Bearer" (anything verifying them as a JWT fails). So no Authorization header.
+const sbHeaders = (extra) => ({ apikey: SUPABASE.key, "Content-Type": "application/json", ...extra });
+const sb = (path, { method = "GET", body, prefer } = {}) =>
+  fetch(SB_URL + "/rest/v1" + path, {
+    method, cache: "no-store", headers: sbHeaders(prefer ? { Prefer: prefer } : {}),
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+const sbTime = async () => {
+  const r = await sb("/rpc/server_time", { method: "POST", body: {} });
+  if (!r.ok) throw new Error("server_time " + r.status);
+  return Number(await r.json());
+};
+const st = (r) => ({ ok: r.ok, status: r.status });
+const eq = (v) => "eq." + encodeURIComponent(v);
+// supabase mode: syncClock gets its samples from the rpc (t1=t2: no server-side processing time to subtract)
+export const timeSource = MODE === "supabase"
+  ? { fetchTime: async () => { const n = await sbTime(); return { t1: n, t2: n }; }, goodDelay: 300, goodSpread: 20 }
+  : null;
 
 const data = (p) => new URL("../data/" + p, import.meta.url);
 const OK = { ok: true, status: 200 };
@@ -66,7 +91,7 @@ export async function getExperiment(expId) {
     if (!r.ok) throw new Error(r.status);
     return r.json();
   }
-  const all = await getJson(data("experiments.json"));
+  const all = await getJson(data("experiments.json")); // static + supabase: experiments live in the repo
   if (!all) throw new Error("experiments.json");
   return Object.hasOwn(all, expId) ? { expId, ...all[expId] } : null;
 }
@@ -79,6 +104,19 @@ export async function createSession(expId, participantId) {
   }
   const exp = await getExperiment(expId);
   if (!exp) throw new Error("unknown experiment");
+  if (MODE === "supabase") {
+    const base = `${expId}_${participantId}_${stamp(Date.now())}`;
+    for (let i = 1; i < 50; i++) {
+      const sessionId = i === 1 ? base : `${base}-${i}`;
+      const r = await sb("/sessions", {
+        method: "POST", prefer: "return=minimal",
+        body: { session_id: sessionId, exp_id: expId, participant_id: participantId, source_text: exp.text, user_agent: navigator.userAgent },
+      });
+      if (r.ok) return sessionId;
+      if (r.status !== 409) throw new Error(r.status);
+    }
+    throw new Error("session id collision");
+  }
   const createdAt = Date.now(), base = `${expId}_${participantId}_${stamp(createdAt)}`;
   return tx(["sessions"], "readwrite", async (s) => {
     let sessionId = base;
@@ -93,11 +131,21 @@ export async function createSession(expId, participantId) {
 
 export async function postSync(sessionId, sync) {
   if (MODE === "server") return post(`/sessions/${sessionId}/sync`, sync);
+  if (MODE === "supabase") return st(await sb("/syncs", { method: "POST", prefer: "return=minimal", body: { session_id: sessionId, phase: sync.phase ?? null, data: sync } }));
   return safe(upd(sessionId, (m) => m.syncs.push(sync)));
 }
 
 export async function postEvents(sessionId, seq, events) {
   if (MODE === "server") return post(`/sessions/${sessionId}/events`, { seq, events });
+  if (MODE === "supabase") {
+    // ignore-duplicates makes a re-sent batch a no-op (idempotent); the whole call is safe to retry
+    const r = await sb("/events", {
+      method: "POST", prefer: "resolution=ignore-duplicates,return=minimal",
+      body: events.map((ev) => ({ session_id: sessionId, seq: ev.seq, batch: seq, ev })),
+    });
+    if (!r.ok || !events.some((x) => x.type === "session_start")) return st(r);
+    return st(await sb(`/sessions?session_id=${eq(sessionId)}&started_at=is.null`, { method: "PATCH", prefer: "return=minimal", body: { started_at: await sbTime() } }));
+  }
   return safe(tx(["sessions", "events"], "readwrite", async (s, e) => {
     const meta = await rq(s.get(sessionId));
     if (!meta) throw new Error("no such session");
@@ -112,6 +160,12 @@ export async function postEvents(sessionId, seq, events) {
 
 export async function finish(sessionId, { finalText, endedAt }) {
   if (MODE === "server") return post(`/sessions/${sessionId}/finish`, { finalText, endedAt });
+  if (MODE === "supabase") {
+    return st(await sb(`/sessions?session_id=${eq(sessionId)}`, {
+      method: "PATCH", prefer: "return=minimal",
+      body: { ended_at: await sbTime(), client_ended_at: Number.isFinite(endedAt) ? endedAt : null, final_text: finalText },
+    }));
+  }
   return safe(upd(sessionId, (m) => { m.finalText = finalText; m.endedAt = Date.now(); m.clientEndedAt = Number.isFinite(endedAt) ? endedAt : null; }));
 }
 
@@ -123,6 +177,11 @@ export async function listSessions() {
     const r = await fetch("/api/sessions", { cache: "no-store" });
     if (!r.ok) throw new Error(r.status);
     return (await r.json()).map((x) => ({ ...x, source: "server" }));
+  }
+  if (MODE === "supabase") { // eventCount is null here (counting per session is too slow); getSession has the real count
+    const r = await sb("/sessions?select=session_id,exp_id,participant_id,created_at,started_at,ended_at&order=created_at.desc&limit=1000");
+    if (!r.ok) throw new Error(r.status);
+    return (await r.json()).map((x) => ({ sessionId: x.session_id, expId: x.exp_id, participantId: x.participant_id, startedAt: x.started_at, endedAt: x.ended_at, eventCount: null, source: "supabase" }));
   }
   const out = [], seen = new Set();
   try {
@@ -147,6 +206,7 @@ export async function getSession(id) {
     if (!r.ok) throw new Error(r.status);
     return r.json();
   }
+  if (MODE === "supabase") return sbGetSession(id);
   try {
     const got = await tx(["sessions", "events"], "readonly", async (s, e) => {
       const meta = await rq(s.get(id));
@@ -166,4 +226,42 @@ export async function getSession(id) {
     events.push(e);
   }
   return { meta, events };
+}
+
+// keyset pagination (key > last): PostgREST caps rows per request (default 1000), so loop until a page comes back empty
+async function sbPaged(base, key) {
+  const rows = [];
+  for (let last = -1; ;) {
+    const r = await sb(`${base}&${key}=gt.${last}&order=${key}.asc&limit=1000`);
+    if (!r.ok) throw new Error(r.status);
+    const page = await r.json();
+    if (!page.length) return rows;
+    rows.push(...page);
+    last = page[page.length - 1][key];
+  }
+}
+async function sbGetSession(id) {
+  const r = await sb(`/sessions?session_id=${eq(id)}&select=*`);
+  if (!r.ok) throw new Error(r.status);
+  const m = (await r.json())[0];
+  if (!m) return null;
+  const [syncs, rows] = await Promise.all([
+    sbPaged(`/syncs?session_id=${eq(id)}&select=id,data`, "id"),
+    sbPaged(`/events?session_id=${eq(id)}&select=seq,batch,recv_at,ev`, "seq"),
+  ]);
+  const byBatch = new Map();
+  for (const x of rows) {
+    const b = byBatch.get(x.batch) || { seq: x.batch, recvAt: x.recv_at, lastT: null, n: 0 };
+    b.recvAt = Math.min(b.recvAt, x.recv_at);
+    b.n++;
+    if (Number.isFinite(x.ev.t)) b.lastT = Math.max(b.lastT ?? -Infinity, x.ev.t);
+    byBatch.set(x.batch, b);
+  }
+  const meta = {
+    sessionId: m.session_id, expId: m.exp_id, participantId: m.participant_id, createdAt: Date.parse(m.created_at),
+    startedAt: m.started_at, endedAt: m.ended_at, clientEndedAt: m.client_ended_at, sourceText: m.source_text, finalText: m.final_text,
+    userAgent: m.user_agent, syncs: syncs.map((x) => x.data), eventCount: rows.length,
+    batchRecv: [...byBatch.values()].sort((a, b) => a.seq - b.seq),
+  };
+  return { meta, events: rows.map((x) => x.ev) };
 }

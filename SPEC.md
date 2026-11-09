@@ -142,9 +142,20 @@ offsetFn(tLocal) → UTC ms（§3 の補正）。
 
 ## 5.3 GitHub Pages 版（2026-11-09 ユーザー指示: look & feel 優先、後で Supabase）
 
-- 通信はすべて `public/shared/backend.js` 経由。`MODE`: Node サーバがあれば `"server"`（従来 /api）、github.io 等で /api が無ければ `"static"`。後で `"supabase"` を追加。
+- 通信はすべて `public/shared/backend.js` 経由。`MODE`: Node サーバがあれば `"server"`（従来 /api）、github.io 等で /api が無ければ `"static"`。`"supabase"` は §5.4。
 - static: 課題文 = `../data/experiments.json`、セッション一覧 = `../data/index.json` + このブラウザの IndexedDB に保存したセッション。実験の記録は IndexedDB に保存し、完了時に `<sessionId>.json`（{meta, events}）を自動ダウンロード。時刻同期は無し（unsynced 表示）。ダッシュボードは JSON ファイルのドラッグ&ドロップでも読める。
 - デプロイ: GitHub Actions で `tools/build-pages.mjs` → `_site/`（public/* + data/ + experiments.json + index.json）→ Pages。ルートは実験とダッシュボードへのランディングページ。
+
+## 5.4 Supabase モード（2026-11-09）
+
+- `backend.js` の MODE `"supabase"`: `config.js` の `SUPABASE.url` が非空で、`/api` サーバが応答しない場合に選択（server が優先。`?backend=` で強制可）。素の fetch で PostgREST (`/rest/v1`) を呼ぶ。ヘッダは `apikey` のみ（sb_publishable_ は JWT でないため `Authorization: Bearer` は送らない）。課題文は static 同様 `../data/experiments.json`。
+- テーブル（`supabase/schema.sql`）: `sessions`（§2 の meta を snake_case 列で。started_at / ended_at はサーバ UTC ms、client_ended_at はブラウザ値）、`events`（PK session_id+seq、`batch`=§1 の seq、`ev`=§4 のイベント JSON、`recv_at`=サーバ受信 UTC ms）、`syncs`（§3 の同期結果を `data` jsonb に、`recv_at` 付き）。
+- `events` 挿入は `Prefer: resolution=ignore-duplicates` で冪等（再送 OK）。session_start を含むバッチで `started_at` を server_time() で設定。finish で `ended_at` = server_time()。
+- `recv_at` の目的: ブラウザの時刻同期が失敗した場合に、バッチの受信時刻（recv_at）とバッチ最終イベントのローカル時刻 `lastT` の差からオフラインでオフセットを推定する（`getSession().meta.batchRecv = [{seq, recvAt, lastT, n}]`。下限推定で通信遅延分だけ過大）。
+- 時刻同期（§3.B）: `rpc/server_time`（`clock_timestamp()` の UTC ms）を t1=t2 として使う。clock.js の `fetchTime` オプションで差し替え、同じ 20 サンプル最小遅延法。インターネット RTT 向けに good 判定は遅延 <300ms・spread <20ms（`goodDelay` / `goodSpread`）。
+- `listSessions` は eventCount=null（セッション毎のカウントは遅いため）。`getSession` は keyset ページング（`seq > last`、1000 行/リクエスト上限対策）で全イベントを取得し、meta.eventCount を算出する。
+- 注意: テスト段階の RLS は anon に select/insert（sessions は update も）を許可 = publishable key を持つ誰でも全データを読める。実験本番前に select を authenticated 研究者に限定する。
+- 開発用: localhost のページに限り `?sburl=<url>` で接続先を上書きできる。
 
 ## 6. デザイン
 

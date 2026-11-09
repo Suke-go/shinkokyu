@@ -1,15 +1,15 @@
 // Browser -> server clock sync (SPEC §3.B). Pure ESM; runs in browser and Node.
 // Test hooks (the only ones): options.fetchImpl, options.now.
+// options.fetchTime: async () => ({t1,t2}) replaces the HTTP GET (supabase mode).
 
 const defaultNow = () => performance.timeOrigin + performance.now();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function oneRound({ url, n, gap, drop, fetchImpl, now, onProgress }) {
+async function oneRound({ url, n, gap, drop, fetchImpl, fetchTime, now, onProgress }) {
   const samples = [];
   for (let i = 0; i < n; i++) {
     const t0 = now();
-    const res = await fetchImpl(url, { cache: "no-store" });
-    const { t1, t2 } = await res.json();
+    const { t1, t2 } = fetchTime ? await fetchTime() : await (await fetchImpl(url, { cache: "no-store" })).json();
     const t3 = now();
     if (i >= drop) {
       samples.push({ t0, t1, t2, t3, offset: ((t1 - t0) + (t2 - t3)) / 2, delay: (t3 - t0) - (t2 - t1) });
@@ -32,7 +32,8 @@ async function oneRound({ url, n, gap, drop, fetchImpl, now, onProgress }) {
 }
 
 export async function syncClock({
-  phase, onProgress, fetchImpl, url = "/api/time", now = defaultNow, n = 20, gap = 100, drop = 3, maxRetries = 3,
+  phase, onProgress, fetchImpl, fetchTime, url = "/api/time", now = defaultNow, n = 20, gap = 100, drop = 3, maxRetries = 3,
+  goodDelay = 50, goodSpread = 5, // internet RTT (supabase) needs looser thresholds
 }) {
   fetchImpl = fetchImpl || ((...a) => fetch(...a));
   let best = null;
@@ -40,9 +41,9 @@ export async function syncClock({
   let quality = "bad";
   for (; attempts <= maxRetries; ) {
     attempts++;
-    const r = await oneRound({ url, n, gap, drop, fetchImpl, now, onProgress });
+    const r = await oneRound({ url, n, gap, drop, fetchImpl, fetchTime, now, onProgress });
     if (!best || r.delay < best.delay) best = r;
-    if (r.delay < 50 && r.spreadLow5 < 5) { quality = "good"; best = r; break; }
+    if (r.delay < goodDelay && r.spreadLow5 < goodSpread) { quality = "good"; best = r; break; }
   }
   const g = globalThis;
   return {

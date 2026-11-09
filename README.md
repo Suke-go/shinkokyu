@@ -20,3 +20,10 @@ node server/server.js          # http://127.0.0.1:8787  (LAN の別PCから使�
 - サーバ無し: 課題文は `data/experiments.json`、記録はこのブラウザの IndexedDB に保存し、完了時に `<sessionId>.json` を自動ダウンロード。時刻同期は無し。
 - ダッシュボードはこのブラウザの記録と、ビルド時に同梱した `data/` のセッションを一覧する。URL に `?backend=static|server` で強制切替。
 - ローカル確認: `node tools/build-pages.mjs _site` → `_site` を任意の静的サーバで配信。
+
+## Supabase（本番寄りの保存先）
+
+1. Supabase の SQL Editor に [supabase/schema.sql](supabase/schema.sql) を貼って実行（何度実行しても安全）。
+2. Project URL（`https://xxxx.supabase.co`）を `public/shared/config.js` の `SUPABASE.url` に書く（publishable key は公開前提で入っている）。
+3. commit & push（Pages が再ビルド）。Node サーバが無い環境では自動で supabase モードになる。`?backend=static|server|supabase` で強制切替。
+- 注意: テスト段階の RLS は「publishable key を持つ誰でも全データ閲覧可」。実験本番の前に select を研究者(authenticated)に限定すること。

@@ -64,4 +64,13 @@ const r3 = await syncClock({ phase: "start", gap: 0, n: 5, drop: 1, fetchImpl: k
 assert.equal(r3.quality, "bad");
 assert.equal(r3.attempts, 4);
 
+// fetchTime option (supabase): internet-like 80ms RTT, small jitter within goodSpread
+let c4 = 1000, j = 0;
+const fetchTime = async () => { c4 += 40 + (j++ % 3); const t = c4 + 250; c4 += 40; return { t1: t, t2: t }; };
+const r4 = await syncClock({ phase: "start", gap: 0, fetchTime, now: () => c4, goodDelay: 300, goodSpread: 20 });
+assert.equal(r4.quality, "good");
+assert.ok(Math.abs(r4.offset - 250) < 3);
+const c5 = { v: 1000 };
+const r5 = await syncClock({ phase: "start", gap: 0, n: 5, drop: 1, fetchTime: async () => { c5.v += 80; const t = c5.v + 250; c5.v += 80; return { t1: t, t2: t }; }, now: () => c5.v });
+assert.equal(r5.quality, "bad"); // 160ms RTT fails the default thresholds
 console.log("clock.test.js: all passed");
