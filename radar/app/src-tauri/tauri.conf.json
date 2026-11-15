@@ -3,7 +3,7 @@
   "productName": "shinkokyu-radar",
   "identifier": "io.github.suke-go.shinkokyu-radar",
   "build": {
-    "frontendDist": "../ui",
+    "frontendDist": "../dist",
     "beforeBuildCommand": "npm run build",
     "beforeDevCommand": "npm run build"
   },

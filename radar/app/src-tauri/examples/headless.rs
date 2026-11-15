@@ -1,9 +1,9 @@
-//! The app's recording loop without a window, for checking against hardware and saved captures.
+//! The app's measuring loop without a window, for checking against hardware and saved captures.
 //!
 //!     cargo run --example headless -- record 60 out/radar_test     # 60 s from the radar
 //!     cargo run --example headless -- replay capture.bin           # estimates for a saved .bin
 use shinkokyu_radar::radar::{Chirp, N_ANT};
-use shinkokyu_radar::{session, vitals, Options};
+use shinkokyu_radar::{measure, vitals, Clock, Options};
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
 fn main() {
@@ -11,13 +11,13 @@ fn main() {
     match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
         ["record", seconds, stem] => {
             let stop = AtomicBool::new(false);
-            let opts = Options { stem: stem.into(), backend: "auto".into(), server: "http://127.0.0.1:8787".into() };
+            let opts = Options { clock: Clock::new(), clock_offset_ms: 0.0, session_id: None, stem: Some(stem.into()) };
             std::thread::scope(|s| {
                 s.spawn(|| {
                     std::thread::sleep(std::time::Duration::from_secs_f64(seconds.parse().expect("seconds")));
                     stop.store(true, Relaxed);
                 });
-                let result = session(&opts, &stop, &|name, mut v| {
+                let result = measure(&opts, &stop, &|name, mut v| {
                     v.as_object_mut().map(|o| o.remove("disp"));
                     println!("{name} {v}");
                 });

@@ -80,6 +80,9 @@ body { overflow: hidden; }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--ink-3); }
 .dot.good { background: var(--ok); }
 .dot.bad { background: #D69E00; }
+/* desktop app only: pale until heart-rate estimates are arriving */
+.radar { margin-left: var(--s2); font-style: normal; color: var(--line); }
+.radar.on { color: var(--ink-2); }
 
 .scrim { position: fixed; inset: 0; background: rgba(31,35,40,.35); display: grid; place-items: center; padding: var(--s5); }
 .dialog { max-width: 360px; }

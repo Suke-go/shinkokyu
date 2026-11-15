@@ -25,6 +25,8 @@ jobs:
           targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
       - run: npm ci
         working-directory: radar/app
+      - run: npm run build
+        working-directory: radar/app
       - run: cargo test
         working-directory: radar/app/src-tauri
       - uses: tauri-apps/tauri-action@v0

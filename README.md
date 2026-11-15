@@ -16,7 +16,7 @@ node server/server.js          # http://127.0.0.1:8787  (LAN の別PCから使�
 
 ## レーダー（非接触 心拍・呼吸）
 
-79GHz レーダー（PTM RFR79ITR34-30U）で心拍数と呼吸数を測り、タイピングと同じ時計で記録する。デスクトップアプリと Python スクリプトがある → [radar/README.md](radar/README.md)
+79GHz レーダー（PTM RFR79ITR34-30U）で心拍数と呼吸数を測る。デスクトップアプリはタイピング課題も中で行い、心拍の推定を打鍵と同じ記録に入れる。レーダーだけを記録する Python スクリプトもある → [radar/README.md](radar/README.md)
 
 ## GitHub Pages（静的デモ版）
 

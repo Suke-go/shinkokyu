@@ -1,4 +1,3 @@
-mod clock;
 pub mod radar;
 pub mod vitals;
 
@@ -17,54 +16,54 @@ const WINDOW_S: f64 = 20.0;
 const RMIN_M: f64 = 0.3;
 const RMAX_M: f64 = 1.5;
 
+/// Wall-clock origin plus a monotonic counter, like the browser's performance.timeOrigin +
+/// performance.now(): a wall-clock step mid-run cannot corrupt it.
+pub struct Clock {
+    epoch_ms: f64,
+    t0: Instant,
+}
+
+impl Clock {
+    pub fn new() -> Clock {
+        Clock { epoch_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1000.0, t0: Instant::now() }
+    }
+
+    pub fn now_ms(&self) -> f64 {
+        self.epoch_ms + self.t0.elapsed().as_secs_f64() * 1000.0
+    }
+}
+
 pub struct Options {
-    /// output files are `<stem>.json`, `.bin`, `.hr.jsonl`
-    pub stem: PathBuf,
-    /// "auto", "server" or "supabase"
-    pub backend: String,
-    pub server: String,
+    pub clock: Clock,
+    /// Added to `clock` to get the typing page's local clock (0 without a typing session).
+    pub clock_offset_ms: f64,
+    /// Typing session the recording belongs to.
+    pub session_id: Option<String>,
+    /// Write `<stem>.json`, `.bin`, `.hr.jsonl`. None = show estimates only.
+    pub stem: Option<PathBuf>,
 }
 
-/// UTC `YYYYMMDD-HHMMSS`, the stamp the typing server puts in session ids.
-pub fn utc_stamp(secs: u64) -> String {
-    // days -> civil date (Howard Hinnant's algorithm)
-    let z = (secs / 86400) as i64 + 719_468;
-    let (era, doe) = (z.div_euclid(146_097), z.rem_euclid(146_097));
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let (d, m) = (doy - (153 * mp + 2) / 5 + 1, if mp < 10 { mp + 3 } else { mp - 9 });
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    let s = secs % 86400;
-    format!("{y:04}{m:02}{d:02}-{:02}{:02}{:02}", s / 3600, s % 3600 / 60, s % 60)
-}
-
-/// Record until `stop` is set. Events for the UI: "status" {state, text?, progress?} and
+/// Measure until `stop` is set. Events for the UI: "status" {state, text?, progress?} and
 /// "estimate" {t, window, ...Estimate, disp}.
-pub fn session(opts: &Options, stop: &AtomicBool, emit: &dyn Fn(&str, Value)) -> Result<(), String> {
+pub fn measure(opts: &Options, stop: &AtomicBool, emit: &dyn Fn(&str, Value)) -> Result<(), String> {
     let es = |e: std::io::Error| e.to_string();
     let chirp = Chirp::load();
-    let clock = clock::Clock::new();
-    let path = |ext: &str| PathBuf::from(format!("{}.{ext}", opts.stem.display()));
-    let mut meta = json!({
-        "device": "PTM RFR79ITR34-30U (IWR1843, mmWave SDK 3.5 demo)", "app": env!("CARGO_PKG_VERSION"), "config": chirp.lines,
-        "frameHz": chirp.frame_hz, "rangeResM": chirp.range_res, "wavelengthM": chirp.wavelength,
-        "window": WINDOW_S, "rmin": RMIN_M, "rmax": RMAX_M,
-        "bin": format!("records of {{t: float64 local arrival ms, fnum: uint32, iq: int16[{}][{N_ANT}][imag,real]}}", chirp.n_bins),
-        "syncs": [],
-    });
-    let sync = |phase: &str, meta: &mut Value| -> Result<(), String> {
-        emit("status", json!({ "state": "sync" }));
-        match clock::sync(&clock, &opts.backend, &opts.server, phase) {
-            Ok(s) => meta["syncs"].as_array_mut().unwrap().push(s),
-            Err(e) => emit("status", json!({ "state": "sync", "text": format!("時刻同期に失敗しました（{e}）。未同期のまま記録します") })),
-        }
-        std::fs::write(path("json"), meta.to_string()).map_err(es)
-    };
-    sync("start", &mut meta)?;
-
-    let mut rec = BufWriter::new(File::create(path("bin")).map_err(es)?);
-    let mut hr_log = File::create(path("hr.jsonl")).map_err(es)?;
+    let now_ms = || opts.clock.now_ms() + opts.clock_offset_ms;
+    let (mut rec, mut hr_log) = (None, None);
+    if let Some(stem) = &opts.stem {
+        let path = |ext: &str| PathBuf::from(format!("{}.{ext}", stem.display()));
+        let meta = json!({
+            "device": "PTM RFR79ITR34-30U (IWR1843, mmWave SDK 3.5 demo)", "app": env!("CARGO_PKG_VERSION"), "config": chirp.lines,
+            "frameHz": chirp.frame_hz, "rangeResM": chirp.range_res, "wavelengthM": chirp.wavelength,
+            "window": WINDOW_S, "rmin": RMIN_M, "rmax": RMAX_M,
+            "bin": format!("records of {{t: float64 local arrival ms, fnum: uint32, iq: int16[{}][{N_ANT}][imag,real]}}", chirp.n_bins),
+            "sessionId": opts.session_id,
+            "clock": if opts.session_id.is_some() { "the typing page's local clock: convert with that session's syncs" } else { "this PC's clock, unsynced" },
+        });
+        std::fs::write(path("json"), meta.to_string()).map_err(es)?;
+        rec = Some(BufWriter::new(File::create(path("bin")).map_err(es)?));
+        hr_log = Some(File::create(path("hr.jsonl")).map_err(es)?);
+    }
     let win = (WINDOW_S * chirp.frame_hz) as usize;
     let mut window: VecDeque<(u32, Vec<u8>)> = VecDeque::with_capacity(win);
     let (mut anchor, mut last_fnum, mut configured, mut last_est) = (f64::INFINITY, None::<u32>, false, Instant::now());
@@ -92,9 +91,11 @@ pub fn session(opts: &Options, stop: &AtomicBool, emit: &dyn Fn(&str, Value)) ->
                 }
                 while !stop.load(Relaxed) {
                     let n = radar::read(data.as_mut(), &mut buf)?;
-                    let t = clock.now_ms();
+                    let t = now_ms();
                     for (fnum, iq) in parser.feed(&buf[..n]) {
-                        rec.write_all(&t.to_le_bytes()).and_then(|_| rec.write_all(&fnum.to_le_bytes())).and_then(|_| rec.write_all(&iq)).map_err(fatal)?;
+                        if let Some(rec) = &mut rec {
+                            rec.write_all(&t.to_le_bytes()).and_then(|_| rec.write_all(&fnum.to_le_bytes())).and_then(|_| rec.write_all(&iq)).map_err(fatal)?;
+                        }
                         if last_fnum.is_some_and(|l| fnum < l) {
                             // sensor was restarted: new frame clock
                             anchor = f64::INFINITY;
@@ -114,7 +115,9 @@ pub fn session(opts: &Options, stop: &AtomicBool, emit: &dyn Fn(&str, Value)) ->
                         continue;
                     }
                     last_est = Instant::now();
-                    rec.flush().map_err(fatal)?;
+                    if let Some(rec) = &mut rec {
+                        rec.flush().map_err(fatal)?;
+                    }
                     if window.len() < win {
                         emit("status", json!({ "state": "collecting", "progress": window.len() as f64 / win as f64 }));
                         continue;
@@ -125,7 +128,9 @@ pub fn session(opts: &Options, stop: &AtomicBool, emit: &dyn Fn(&str, Value)) ->
                     let mut row = serde_json::to_value(&est).unwrap();
                     row["t"] = json!(anchor + fnums[win - 1] as f64 * chirp.frame_ms);
                     row["window"] = json!(WINDOW_S);
-                    writeln!(hr_log, "{row}").map_err(fatal)?;
+                    if let Some(log) = &mut hr_log {
+                        writeln!(log, "{row}").map_err(fatal)?;
+                    }
                     row["disp"] = json!(est.disp_mm);
                     emit("estimate", row);
                 }
@@ -145,12 +150,14 @@ pub fn session(opts: &Options, stop: &AtomicBool, emit: &dyn Fn(&str, Value)) ->
             }
         }
     };
-    rec.flush().map_err(es)?;
-    sync("end", &mut meta)?;
+    if let Some(mut rec) = rec {
+        rec.flush().map_err(es)?;
+    }
     result
 }
 
 struct Running {
+    session_id: Option<String>,
     stop: Arc<AtomicBool>,
     thread: std::thread::JoinHandle<()>,
 }
@@ -158,34 +165,54 @@ struct Running {
 #[derive(Default)]
 struct AppState(Mutex<Option<Running>>);
 
-/// Starts a recording into Documents/shinkokyu-radar and returns the files' common stem.
-#[tauri::command]
-fn start(app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<String, String> {
+/// Same rule as the typing server's session ids; the id becomes part of a file name.
+fn valid_session_id(id: &str) -> bool {
+    (1..=160).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Without arguments: show estimates only (aiming the radar). With a typing session and that
+/// page's current clock reading: also record, into Documents/shinkokyu-radar/radar_<session>.*,
+/// on the page's clock.
+#[tauri::command(async)]
+fn start(app: tauri::AppHandle, state: tauri::State<AppState>, session: Option<String>, page_now: Option<f64>) -> Result<(), String> {
+    let clock = Clock::new();
+    let clock_offset_ms = page_now.map_or(0.0, |p| p - clock.now_ms()); // taken first: the IPC delay is under a millisecond
     let mut running = state.0.lock().unwrap();
-    if running.as_ref().is_some_and(|r| !r.thread.is_finished()) {
-        return Err("計測中です".into());
+    if let Some(r) = running.take_if(|r| !r.thread.is_finished()) {
+        if r.session_id.is_some() && session.is_none() {
+            *running = Some(r);
+            return Err("タイピング課題の記録中です".into());
+        }
+        r.stop.store(true, Relaxed);
+        let _ = r.thread.join();
     }
-    let dir = app.path().document_dir().map_err(|e| e.to_string())?.join("shinkokyu-radar");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-    let opts = Options { stem: dir.join(format!("radar_{}", utc_stamp(now))), backend: "auto".into(), server: "http://127.0.0.1:8787".into() };
-    let stem = opts.stem.display().to_string();
+    let stem = match &session {
+        Some(id) if valid_session_id(id) => {
+            let dir = app.path().document_dir().map_err(|e| e.to_string())?.join("shinkokyu-radar");
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            Some(dir.join(format!("radar_{id}")))
+        }
+        Some(_) => return Err("invalid session id".into()),
+        None => None,
+    };
+    let opts = Options { clock, clock_offset_ms, session_id: session.clone(), stem };
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();
     let thread = std::thread::spawn(move || {
         let emit = |name: &str, payload: Value| {
             let _ = app.emit(name, payload);
         };
-        let result = session(&opts, &flag, &emit);
-        emit("stopped", json!({ "error": result.err() }));
+        let result = measure(&opts, &flag, &emit);
+        emit("stopped", json!({ "error": result.err(), "session": opts.session_id }));
     });
-    *running = Some(Running { stop, thread });
-    Ok(stem)
+    *running = Some(Running { session_id: session, stop, thread });
+    Ok(())
 }
 
+/// Stops the measurement started with the same `session` (none = the estimates-only one).
 #[tauri::command]
-fn stop(state: tauri::State<AppState>) {
-    if let Some(r) = state.0.lock().unwrap().as_ref() {
+fn stop(state: tauri::State<AppState>, session: Option<String>) {
+    if let Some(r) = state.0.lock().unwrap().as_ref().filter(|r| r.session_id == session) {
         r.stop.store(true, Relaxed);
     }
 }
@@ -197,7 +224,7 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("failed to start")
         .run(|app, event| {
-            // closing the window mid-recording still stops the sensor and writes the end sync
+            // quitting mid-recording still stops the sensor and flushes the file
             if let tauri::RunEvent::Exit = event {
                 let running = app.state::<AppState>().0.lock().unwrap().take();
                 if let Some(r) = running {
@@ -211,8 +238,10 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn utc_stamp_matches_the_calendar() {
-        assert_eq!(super::utc_stamp(1_794_737_049), "20261115-100409");
-        assert_eq!(super::utc_stamp(951_782_400), "20000229-000000");
+    fn session_ids_are_safe_file_names() {
+        assert!(super::valid_session_id("demo-ja_P01_20261115-100409"));
+        for bad in ["", "../x", "a b", "a.b", "a/b", &"x".repeat(161)] {
+            assert!(!super::valid_session_id(bad), "{bad}");
+        }
     }
 }

@@ -1,23 +1,27 @@
 type Status = { state: string; text?: string; progress?: number };
 type Estimate = { hr_bpm: number | null; hr_q: number | null; br_bpm: number | null; span_mm: number | null; disp: number[] };
 type Stopped = { error: string | null };
+type Win = { once(event: string, fn: () => void): void; setFocus(): Promise<void> };
 
 declare global {
   interface Window {
     __TAURI__: {
       core: { invoke<T>(cmd: string): Promise<T> };
       event: { listen<T>(name: string, fn: (e: { payload: T }) => void): Promise<unknown> };
+      webviewWindow: { WebviewWindow: { new (label: string, options: object): Win; getByLabel(label: string): Promise<Win | null> } };
     };
   }
 }
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
+const { WebviewWindow } = window.__TAURI__.webviewWindow;
 
 const el = (id: string) => document.getElementById(id)!;
 const hr = el("hr"), br = el("br"), note = el("note"), toggle = el("toggle");
 const canvas = el("trace") as HTMLCanvasElement;
 const setState = (s: string) => { document.body.dataset.state = s; };
 let trace: number[] = [];
+let mine = false; // this window started the measurement (a typing session starts its own)
 
 function show(box: HTMLElement, value: number | null, trusted: boolean) {
   box.querySelector("output")!.textContent = value == null ? "–" : String(Math.round(value));
@@ -43,8 +47,9 @@ function draw() {
 new ResizeObserver(draw).observe(canvas);
 
 function reset() {
+  mine = false;
   setState("idle");
-  toggle.setAttribute("aria-label", "計測開始");
+  toggle.setAttribute("aria-label", "測定開始");
   toggle.style.removeProperty("--p");
   show(hr, null, true);
   show(br, null, true);
@@ -56,10 +61,11 @@ toggle.onclick = async () => {
   try {
     if (document.body.dataset.state === "idle") {
       note.textContent = "";
-      toggle.title = await invoke<string>("start"); // where the files go
-      toggle.setAttribute("aria-label", "計測停止");
-      setState("sync");
-    } else {
+      await invoke("start");
+      mine = true;
+      toggle.setAttribute("aria-label", "測定停止");
+      setState("connecting");
+    } else if (mine) {
       await invoke("stop");
       setState("stopping");
     }
@@ -68,10 +74,18 @@ toggle.onclick = async () => {
   }
 };
 
+// The typing task and the dashboard open in their own windows; closing one comes back here.
+function open(label: string, url: string, title: string) {
+  const w = new WebviewWindow(label, { url, title, width: 1280, height: 820 });
+  w.once("tauri://error", async () => (await WebviewWindow.getByLabel(label))?.setFocus()); // already open
+}
+el("task").onclick = () => open("task", "site/experiment/", "転記タイピング実験");
+el("dash").onclick = () => open("dash", "site/dashboard/", "ダッシュボード");
+
 listen<Status>("status", ({ payload: s }) => {
   if (document.body.dataset.state !== "stopping") setState(s.state);
   if (s.progress != null) toggle.style.setProperty("--p", String(s.progress));
-  note.textContent = s.state === "retry" || s.state === "sync" ? (s.text ?? "") : "";
+  note.textContent = s.state === "retry" ? (s.text ?? "") : "";
 });
 
 listen<Estimate>("estimate", ({ payload: e }) => {
