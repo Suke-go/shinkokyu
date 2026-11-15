@@ -36,6 +36,23 @@ const snapshot = (type = "snapshot") => {
   if (type === "snapshot") buf[buf.length - 1].isComposing = composing; // dashboard skips composing snapshots
 };
 
+/* ---------- radar: only inside the desktop app (radar/app) ----------
+   Heart/breathing estimates join this event log, so they share this page's clock, sync and upload. */
+const tauri = window.__TAURI__;
+const radar = (cmd, args) => { if (tauri) tauri.core.invoke(cmd, { session: sessionId, ...args }).catch(() => {}); };
+if (tauri) {
+  const heart = $("st-radar");
+  heart.hidden = false;
+  tauri.event.listen("estimate", ({ payload: r }) => {
+    if (!active) return;
+    log("vital", null, JSON.stringify({ hr: r.hr_bpm, q: r.hr_q, br: r.br_bpm, span: r.span_mm, range: r.range_m }));
+    buf[buf.length - 1].t = r.t; // end of the 20 s the estimate covers, already on this page's clock
+    heart.classList.add("on");
+  });
+  tauri.event.listen("status", () => heart.classList.remove("on")); // connecting or reconnecting
+  window.addEventListener("pagehide", () => { if (sessionId) radar("stop"); });
+}
+
 /* ---------- command suppression: the task is typing characters only ---------- */
 const IME_KEYS = new Set(["Process", "Convert", "NonConvert", "KanaMode", "Hankaku", "Zenkaku", "HankakuZenkaku", "Alphanumeric", "Romaji", "Hiragana", "Katakana", "Eisu"]);
 const EDIT_KEYS = new Set(["Backspace", "Delete", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"]);
@@ -237,6 +254,7 @@ $("start-btn").addEventListener("click", async () => {
   active = true;
   updateCount();
   snapshot("session_start");
+  radar("start", { pageNow: performance.timeOrigin + performance.now() });
   ta.focus();
 });
 
@@ -260,6 +278,7 @@ $("end-btn").addEventListener("click", async () => {
   snapshot();
   snapshot("session_end");
   active = false;
+  radar("stop");
   line.textContent = "データを送信しています…";
   flush();
   if (be.timeUrl || be.timeSource) try {

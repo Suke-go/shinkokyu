@@ -1,0 +1,61 @@
+:root { --ink: #222; --mid: #8a8a8a; --soft: #dcdcdc; --bg: #fff; }
+
+html, body { height: 100%; margin: 0; }
+body {
+  box-sizing: border-box;
+  padding: 5vmin;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+  justify-items: center;
+  align-items: center;
+  gap: 2vmin;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: "Segoe UI", "Hiragino Sans", system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+
+.hr, .br { display: flex; align-items: center; gap: .3em; line-height: 1; }
+.hr { font-size: clamp(56px, 24vmin, 240px); font-weight: 300; }
+.br { font-size: clamp(18px, 6vmin, 60px); color: var(--mid); }
+.hr svg { width: .34em; fill: currentColor; animation: beat 1s ease-in-out infinite; }
+.br svg { width: 1em; fill: none; stroke: currentColor; stroke-width: 2.5; stroke-linecap: round; }
+
+/* an estimate that should not be trusted is shown, but pale and with a still heart */
+.weak { color: var(--soft); }
+.weak svg, body:not([data-state="streaming"]) .hr svg { animation: none; }
+body:not([data-state="streaming"]) :is(.hr, .br) { color: var(--soft); }
+
+@keyframes beat { 0%, 100% { transform: scale(1); } 15% { transform: scale(1.2); } 30% { transform: scale(1); } }
+
+canvas { width: 100%; height: 100%; }
+
+nav { display: flex; align-items: center; gap: 7vmin; }
+button { border: 0; cursor: pointer; }
+button:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+
+/* the ring fills while the first window is collected, then stays full while measuring */
+#toggle {
+  --p: 0;
+  position: relative;
+  width: clamp(48px, 13vmin, 96px);
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: conic-gradient(var(--mid) calc(var(--p) * 1turn), var(--soft) 0);
+}
+#toggle::before { content: ""; position: absolute; inset: 3px; border-radius: 50%; background: var(--bg); }
+#toggle span { position: absolute; inset: 32%; border-radius: 50%; background: var(--mid); transition: border-radius .2s, background .2s; }
+#toggle:hover span { background: var(--ink); }
+body:not([data-state="idle"]) #toggle span { border-radius: 12%; }
+body[data-state="streaming"] #toggle { --p: 1; }
+body:is([data-state="connecting"], [data-state="retry"], [data-state="stopping"]) #toggle { animation: wait 1.2s ease-in-out infinite; }
+@keyframes wait { 50% { opacity: .35; } }
+
+.go { width: clamp(28px, 7vmin, 48px); aspect-ratio: 1; padding: 0; background: none; color: var(--mid); }
+.go:hover { color: var(--ink); }
+.go svg { width: 100%; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+
+#note { min-height: 1.2em; margin: 0; font-size: 12px; color: var(--mid); text-align: center; user-select: text; }
+
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
