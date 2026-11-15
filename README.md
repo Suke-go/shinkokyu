@@ -14,6 +14,10 @@ node server/server.js          # http://127.0.0.1:8787  (LAN の別PCから使�
 
 テスト: `node server/test.js` / `node public/shared/clock.test.js` / `node public/shared/metrics.test.js` / E2E `node tools/e2e.mjs <作業用フォルダ>`（Edge 必須）
 
+## レーダー（非接触 心拍・呼吸）
+
+79GHz レーダー（PTM RFR79ITR34-30U）で心拍数と呼吸数を測り、タイピングと同じ時計で記録する。デスクトップアプリと Python スクリプトがある → [radar/README.md](radar/README.md)
+
 ## GitHub Pages（静的デモ版）
 
 `.github/workflows/pages.yml` が main への push で `node tools/build-pages.mjs _site` を実行して Pages に公開（リポジトリ設定の Pages > Source を "GitHub Actions" に）。例: https://suke-go.github.io/shinkokyu/

@@ -1,0 +1,39 @@
+name: radar-release
+on:
+  push:
+    tags: ['radar-v*']
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            args: ''
+          - os: macos-latest
+            args: '--target universal-apple-darwin'
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - run: npm ci
+        working-directory: radar/app
+      - run: cargo test
+        working-directory: radar/app/src-tauri
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: radar/app
+          tagName: ${{ github.ref_name }}
+          releaseName: レーダー計測アプリ ${{ github.ref_name }}
+          releaseBody: 使い方は radar/README.md。
+          releaseDraft: true
+          args: ${{ matrix.args }}

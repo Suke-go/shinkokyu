@@ -157,6 +157,16 @@ offsetFn(tLocal) → UTC ms（§3 の補正）。
 - 注意: テスト段階の RLS は anon に select/insert（sessions は update も）を許可 = publishable key を持つ誰でも全データを読める。実験本番前に select を authenticated 研究者に限定する。
 - 開発用: localhost のページに限り `?sburl=<url>` で接続先を上書きできる。
 
+## 5.5 レーダー計測 `radar/`（2026-11-15）
+
+デスクトップアプリ（`radar/app`、Tauri: Rust + TS）と `radar/vitals.py` の 2 実装。チャープ設定は `radar/chirp.cfg` を共有し、推定方法・出力ファイルは同一。使い方は `radar/README.md`。
+
+- 機材: PTM RFR79ITR34-30U（TI IWR1843、mmWave SDK 3.5 標準デモ FW、FT4232H: チャネル A = CLI 115200bps / B = データ 921600bps）。77.0–80.82GHz、1TX/4RX、64 距離ビン（約 4.8cm）、40 フレーム/秒（位相が折り返さない上限 38mm/s）。1 フレーム = 0.75ms 間隔の 16 チャープ（12ms）で、その和（ゼロドップラー）を使うため約 8cm/s より速い動き（打鍵中の手・腕）は打ち消される。
+- 取得: 標準デモの range-azimuth heatmap TLV（ゼロドップラーの距離ビン複素値）。動きの大きい距離ビン（最大の 25% 以上）× 4 アンテナについて、フレーム間の位相差を電力重みで合成 → 速度、その累積 = 変位。呼吸 0.1–0.6Hz（変位）、心拍 0.8–2.5Hz（速度）について、直線トレンド除去 + Hann 窓のスペクトルから帯域内で最大の極大点を取る。直近 `window` 秒（既定 20）を 2 秒毎に推定。`hr_q`（ピーク ±0.1Hz の電力比）< 0.35 の値は信用しない。
+- 時刻: §3.B と同じ方式で開始時・終了時に同期し、`.json` の `syncs` に §3 と同形（+ `source`）で保存（`makeOffsetFn` がそのまま使える）。同期先は backend.js と同じ選び方: `/api/time` が応答すれば server、無ければ Supabase `rpc/server_time`。**タイピング画面と同じ同期先でなければならない**（アプリは自動選択のみ。ローカルサーバ起動中に Pages 版で実験するなら `vitals.py --backend supabase`）。**記録時刻は生のローカル ms**、補正は解析時（§3 と同じ方針）。タイピングのセッションとは UTC の重なりで突き合わせる。
+- ファイル `radar_<UTC stamp>.*`（アプリ: ドキュメント/shinkokyu-radar、`vitals.py`: `radar/captures`）: `.json`（設定・syncs）/ `.bin`（全フレーム。固定長レコード `t` float64 到着ローカル ms, `fnum` uint32, `iq` int16[64][4][imag,real]）/ `.hr.jsonl`（`{t, window, range_m, span_mm, br_bpm, br_q, hr_bpm, hr_q, hr_harmonic}`。`t` は窓の終端、値は (t−window, t] の推定）/ `.png`（`vitals.py` のみ。最後の窓の波形）。
+- フレーム時刻 = レーダーのフレーム番号 × 25ms + 最小遅延の到着時刻で決めた基準。残差は約 15–20ms の遅れ（フレーム処理 + UART）と水晶ドリフト。
+
 ## 6. デザイン
 
 共通トーン: 落ち着いた「文書ソフト」風。Word を模倣しない（ロゴ・リボン・色は使わない）が、
