@@ -29,7 +29,22 @@ Questions: (1) can breathing and heart rate come out of one pipeline, (2) how is
 | Grassmann et al., "Respiratory changes in response to cognitive load: a systematic review", [PMC4923594](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4923594/) | Respiratory variability is rarely studied; total variability of the rate is not systematically changed by cognitive load, the correlated fraction decreases. Mental stress and mental load are different states. | Snippet |
 | Bioradar stress / workload, Biomed. Signal Process. Control 2018, [doi:10.1016/j.bspc.2018.03.006](https://doi.org/10.1016/j.bspc.2018.03.006) | Stress detected from radar respiration patterns alone; a workload study reports accuracy 0.87 (calm vs mental arithmetic). | Snippet |
 
-Not obtained: https://www.nature.com/articles/s41598-025-09112-w (redirects to a sign-in check; a search for the identifier found nothing).
+### MRVS, Scientific Reports 2025, https://www.nature.com/articles/s41598-025-09112-w
+Status: Read, from the method and results text pasted by the user. Equations, tables (radar parameters, wavelet table, thresholds) and figures were not in the paste, so the frame rate and window length are unknown.
+
+- Same group and reference device as mmWave-RM (Northwest Normal University, HUAWEI WATCH GT2). Radar: the text says IWR1642BOOST once and IWR1843BOOST (3 TX, 4 RX) elsewhere, with DCA1000 raw capture and MATLAB. Office, radar directly in front of the chest. Six subjects, plus six more for postures. The model assumes "the human body is stationary to the radar".
+- Pipeline: range FFT -> the target's range bin -> DC offset removal -> static clutter suppression ("coherent accumulation": SNR 7.56 dB raw, 9.49 mean-phase cancellation, 13.8 MTI, 15.36 theirs) -> phase unwrapping (jumps over pi corrected by 2 pi) -> first-order phase difference (emphasises the heartbeat, removes drift) -> discrete wavelet transform, db5, 4 levels: breathing taken from approximation A4, heartbeat from detail D3 -> each reconstructed and smoothed by an adaptive Kalman filter (noise covariance estimated on the fly) -> rate = highest peak of the power spectrum, rejected if the peak is under a confidence threshold (0.01, chosen from false-positive / false-negative rates with and without a heartbeat present).
+- Heart rate against the watch: MAPE 1.85-4.78% (band-pass 0.8-2 Hz: 2.67-16.6%; VMD with K=4, alpha=2000: 4.27-10.48%).
+- Distance 0.4-1.2 m in 0.2 m steps, same height and angle: error grows with distance, stays within 5% / 4 bpm at 1.2 m.
+- Incidence angle at 0.8 m: MAPE 1.65% at 0 deg, 3.95% at 15, 5.84% at 30, 6.89% at 45 (smaller effective reflecting area).
+- Posture at 0.8 m, 1 min each: worst-case error 4 bpm sitting, 7 standing, 9 standing with the back to the radar (MAPE 5.13% standing, 6.17% back). They attribute standing errors to random body movement and the back result to its smaller, more dispersed motion.
+- Mouth breathing gave higher heart-rate error than nasal breathing; they suspect it brings random body movement.
+- Not in the paper: handling of body movement, breath-by-breath intervals, variability, a reference better than a wristband.
+
+Notes for us:
+- A wavelet level is a fixed frequency band set by the frame rate: A4 = 0 to fs/32, D3 = fs/16 to fs/8. If their frame rate is 20 Hz (as in mmWave-RM; not confirmed), D3 is 1.25-2.5 Hz = 75-150 bpm and a resting heart rate under 75 falls in D4 instead. At our 40 frames/s the same split would be A5 (0-0.625 Hz) for breathing and D4 + D5 (0.625-2.5 Hz) for the heart. So the wavelet step is a filter bank, not a different kind of separation from our two bands.
+- What it has that vitals.py lacks: DC offset removal before the phase is taken, and Kalman smoothing of the separated signals. What we have that it lacks: a test for whether a person is there, bin selection by where the breathing is, movement rejection, per-breath output.
+- The angle and distance results apply directly to placement: face the chest squarely, and nearer is better within 0.4-1.2 m.
 
 ## 2. Findings
 
