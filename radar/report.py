@@ -7,7 +7,9 @@ Writes <capture>.report.png next to each .bin. Works on captures from the app an
 whatever chirp they were recorded with (it reads the capture's own .json).
 """
 import json
+import re
 import sys
+import urllib.request
 from pathlib import Path
 
 import matplotlib
@@ -27,6 +29,34 @@ plt.rcParams["font.family"] = [f for f in ("Yu Gothic", "Hiragino Sans", "Noto S
 plt.rcParams["axes.spines.top"] = plt.rcParams["axes.spines.right"] = False
 
 
+REPO = Path(__file__).parent.parent
+
+
+def key_times(session_id):
+    """Times [ms, typing page's clock] of the keys pressed in a typing session: from the local server's
+    data folder if the session is there, else from Supabase. Empty if neither has it."""
+    local = REPO / "data" / f"{session_id}.events.jsonl"
+    try:
+        if local.exists():
+            events = [json.loads(l) for l in local.read_text(encoding="utf-8").splitlines() if l.strip()]
+        else:
+            cfg = (REPO / "public/shared/config.js").read_text(encoding="utf-8")
+            url, key = (re.search(rf"{k}:\s*'([^']*)'", cfg)[1] for k in ("url", "key"))
+            events, last = [], -1
+            while True:  # PostgREST returns at most 1000 rows a request
+                q = f"{url.rstrip('/')}/rest/v1/events?session_id=eq.{session_id}&select=seq,ev&seq=gt.{last}&order=seq.asc&limit=1000"
+                with urllib.request.urlopen(urllib.request.Request(q, headers={"apikey": key}), timeout=10) as r:
+                    page = json.load(r)
+                if not page:
+                    break
+                events += [x["ev"] for x in page]
+                last = page[-1]["seq"]
+    except (OSError, ValueError, TypeError) as e:
+        print(f"  (typing events of {session_id} not available: {e!r})")
+        return np.array([])
+    return np.array([e["t"] for e in events if e.get("type") == "keydown" and not e.get("repeat")])
+
+
 def load(bin_path):
     meta = json.loads(bin_path.with_suffix(".json").read_text(encoding="utf-8"))
     n_bins = int(next(l for l in meta["config"] if l.startswith("profileCfg")).split()[10])
@@ -39,6 +69,8 @@ def load(bin_path):
     rows = [json.loads(l) for l in bin_path.with_suffix("").with_suffix(".hr.jsonl").read_text().splitlines() if l.strip()]
     for r in rows:
         r["s"] = (r["t"] - rec["t"][0]) / 1000
+    # a recording made during a typing task is on the typing page's clock, the same clock as the key events
+    meta["keys_s"] = (key_times(meta["sessionId"]) - rec["t"][0]) / 1000 if meta.get("sessionId") else np.array([])
     # chest strap logged alongside (strap.py): its mean rate over the same 20 s as each estimate
     rr_path = bin_path.with_suffix("").with_suffix(".rr.jsonl")
     notes = [json.loads(l) for l in rr_path.read_text().splitlines()] if rr_path.exists() else []
@@ -84,7 +116,18 @@ def summarize(meta, rec, H, rows):
         wave, shifting = r["wave"], r["shifting"]
     breaths = [(e / fps, (e - a) / fps, d) for a, e, d in cut_breaths(wave, fps, shifting)]  # (end s, period s, depth mm)
     periods = np.array([b[1] for b in breaths])
+    # typing: a frame counts as "typing" if a key was pressed in the 2 s up to it
+    keys = meta["keys_s"]
+    tf = (np.arange(len(shifting)) + 1) / fps
+    typing = (np.searchsorted(keys, tf) - np.searchsorted(keys, tf - 2)) > 0 if len(keys) else np.zeros(len(tf), bool)
+    in_typing = lambda t: bool(typing[min(int(t * fps), len(typing) - 1)]) if len(typing) else False
+    per_min = lambda n, mask: 60 * n / (mask.sum() / fps) if mask.sum() else float("nan")
     return {
+        "keys": keys, "n_keys": len(keys), "typing_share": float(typing.mean()) if len(keys) else float("nan"),
+        "moved_typing": float(shifting[typing].mean()) if typing.any() else float("nan"),
+        "moved_idle": float(shifting[~typing].mean()) if (~typing).any() else float("nan"),
+        "br_typing": per_min(sum(in_typing(b[0]) for b in breaths), typing),
+        "br_idle": per_min(sum(not in_typing(b[0]) for b in breaths), ~typing),
         "wave": wave, "shifting": shifting, "breaths": breaths, "shift_share": float(shifting.mean()),
         "br_n": len(breaths),
         "br_period": float(np.median(periods)) if len(periods) else float("nan"),
@@ -124,7 +167,8 @@ def figure(name, s, rows, out):
     speed = blocks(s["speed"][:, keep])
     speed[db[:, : speed.shape[1]] < np.nanmax(db) - 25] = np.nan  # nothing reflects there: no phase to speak of
 
-    fig, ax = plt.subplots(5, 1, figsize=(11, 12.5), sharex=True, gridspec_kw={"height_ratios": [3, 3, 2.2, 1.8, 1.8]}, constrained_layout=True)
+    typed = len(s["keys"]) > 0
+    fig, ax = plt.subplots(5 + typed, 1, figsize=(11, 12.5 + 1.4 * typed), sharex=True, gridspec_kw={"height_ratios": [3, 3, 2.2, 1.8, 1.8] + [1.1] * typed}, constrained_layout=True)
     pc = lambda x: "–" if np.isnan(x) else f"{x * 100:.0f}%"
     fig.suptitle(
         f"{name}    {t_max:.0f} 秒 / 毎秒 {s['fps']:g} フレーム / 欠落 {s['dropped']} / USB 切断 {s['link_gaps']} 回\n"
@@ -168,7 +212,11 @@ def figure(name, s, rows, out):
     ax[4].scatter([r["s"] for r in good], [r["hr_bpm"] for r in good], s=28, color="#1F2328", label="使える推定")
     if any(r["strap_bpm"] for r in rows):
         ax[4].plot([r["s"] for r in rows if r["strap_bpm"]], [r["strap_bpm"] for r in rows if r["strap_bpm"]], color="#C2410C", lw=1.5, label="胸ストラップ")
-    ax[4].set(ylabel="毎分", ylim=(30, 160), xlabel="開始からの時間 [秒]", xlim=(0, t_max), title="心拍数。各点は直前 20 秒についての値")
+    ax[4].set(ylabel="毎分", ylim=(30, 160), xlim=(0, t_max), title="心拍数。各点は直前 20 秒についての値")
+    if typed:
+        ax[5].hist(s["keys"], bins=np.arange(0, t_max + 1), color="#8C959F")
+        ax[5].set(ylabel="キー/秒", title="打鍵")
+    ax[-1].set_xlabel("開始からの時間 [秒]")
     ax[4].legend(loc="upper right", frameon=False, fontsize=9, ncols=4)
     ax[4].grid(axis="y", color="#E8ECF0")
     fig.savefig(out, dpi=110)
@@ -189,6 +237,9 @@ def main():
         pct = lambda x: f"{x * 100:.0f}%"
         print(f"{b.stem:40s} {s['seconds']:4.0f} {s['fps']:3g} {s['dropped']:4d} {s['link_gaps']:3d} {s['body_m']:6.2f} {pct(s['still']):>5s} {pct(s['fast']):>5s} "
               f"{pct(s['seen']) if rows else '-':>5s} {s['br_n']:7d} {s['br_period']:6.1f} {s['br_iqr']:4.1f} {s['br_depth']:5.1f} {pct(s['shift_share']):>5s} {pct(s['usable']) if rows else '-':>5s} {s['hr_median']:4.0f} {s['err']:8.1f}")
+        if s["n_keys"]:
+            print(f"  typing: {s['n_keys']} keys, typing {pct(s['typing_share'])} of the time | body shifting {pct(s['moved_typing'])} while typing, {pct(s['moved_idle'])} while not"
+                  f" | breaths counted per minute: {s['br_typing']:.1f} while typing, {s['br_idle']:.1f} while not")
 
 
 if __name__ == "__main__":
