@@ -179,14 +179,28 @@ struct Running {
 #[derive(Default)]
 struct AppState(Mutex<Option<Running>>);
 
+/// UTC `YYYYMMDD-HHMMSS`, the stamp vitals.py and the typing server's session ids use.
+fn utc_stamp(secs: u64) -> String {
+    // days -> civil date (Howard Hinnant's algorithm)
+    let z = (secs / 86400) as i64 + 719_468;
+    let (era, doe) = (z.div_euclid(146_097), z.rem_euclid(146_097));
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let (d, m) = (doy - (153 * mp + 2) / 5 + 1, if mp < 10 { mp + 3 } else { mp - 9 });
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    let s = secs % 86400;
+    format!("{y:04}{m:02}{d:02}-{:02}{:02}{:02}", s / 3600, s % 3600 / 60, s % 60)
+}
+
 /// Same rule as the typing server's session ids; the id becomes part of a file name.
 fn valid_session_id(id: &str) -> bool {
     (1..=160).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-/// Without arguments: show estimates only (aiming the radar). With a typing session and that
-/// page's current clock reading: also record, into Documents/shinkokyu-radar/radar_<session>.*,
-/// on the page's clock.
+/// Records into Documents/shinkokyu-radar. With a typing session and that page's current clock
+/// reading: radar_<session>.*, stamped on the page's clock. Without (the aiming screen):
+/// radar_<UTC stamp>.*, stamped on this PC's clock.
 #[tauri::command(async)]
 fn start(app: tauri::AppHandle, state: tauri::State<AppState>, session: Option<String>, page_now: Option<f64>) -> Result<(), String> {
     let clock = Clock::new();
@@ -200,15 +214,13 @@ fn start(app: tauri::AppHandle, state: tauri::State<AppState>, session: Option<S
         r.stop.store(true, Relaxed);
         let _ = r.thread.join();
     }
-    let stem = match &session {
-        Some(id) if valid_session_id(id) => {
-            let dir = app.path().document_dir().map_err(|e| e.to_string())?.join("shinkokyu-radar");
-            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-            Some(dir.join(format!("radar_{id}")))
-        }
-        Some(_) => return Err("invalid session id".into()),
-        None => None,
-    };
+    if session.as_ref().is_some_and(|id| !valid_session_id(id)) {
+        return Err("invalid session id".into());
+    }
+    let dir = app.path().document_dir().map_err(|e| e.to_string())?.join("shinkokyu-radar");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let name = session.clone().unwrap_or_else(|| utc_stamp(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()));
+    let stem = Some(dir.join(format!("radar_{name}")));
     let opts = Options { clock, clock_offset_ms, session_id: session.clone(), stem };
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();
@@ -251,6 +263,12 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn utc_stamp_matches_the_calendar() {
+        assert_eq!(super::utc_stamp(1_794_737_049), "20261115-100409");
+        assert_eq!(super::utc_stamp(951_782_400), "20000229-000000");
+    }
+
     #[test]
     fn session_ids_are_safe_file_names() {
         assert!(super::valid_session_id("demo-ja_P01_20261115-100409"));
