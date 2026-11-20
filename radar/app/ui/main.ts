@@ -6,9 +6,9 @@ type Live = {
   hr_q: number;
   wave: number[]; // breathing wave of the last 30 s, mm
   cuts: number[]; // indices into `wave` where a breath starts or ends
-  baseline?: { have_s: number; need_s: number }; // steady breathing collected so far
+  baseline?: { have_s: number; need_s: number }; // how far the baseline has run
 };
-type Baseline = { br_bpm: number | null; hr_bpm: number | null };
+type Baseline = { br_bpm: number | null; hr_bpm: number | null; steady_share: number };
 type Seen = { db: number[] };
 type Stopped = { error: string | null };
 type Win = { once(event: string, fn: () => void): void; setFocus(): Promise<void> };
@@ -36,7 +36,7 @@ let trace: number[] = [], cuts: number[] = [], seen: number[] = [];
 let mine = false; // this window started the measurement (a typing session starts its own)
 let estimating = false; // "live" has started: it decides the quality from here on
 
-// Baseline length in minutes of steady breathing; 0 = measure until stopped. Remembered between runs.
+// Baseline length in minutes; 0 = measure until stopped. Remembered between runs.
 const mins = el("mins");
 let minutes = 3;
 try { minutes = Number(localStorage.getItem("baselineMinutes") ?? 3); } catch { /* storage unavailable */ }
@@ -121,13 +121,11 @@ toggle.onclick = async () => {
   }
 };
 
-// The typing task and the dashboard open in their own windows; closing one comes back here.
-function open(label: string, url: string, title: string) {
-  const w = new WebviewWindow(label, { url, title, width: 1280, height: 820 });
-  w.once("tauri://error", async () => (await WebviewWindow.getByLabel(label))?.setFocus()); // already open
-}
-el("task").onclick = () => open("task", "site/experiment/", "転記タイピング実験");
-el("dash").onclick = () => open("dash", "site/dashboard/", "ダッシュボード");
+// The typing task opens in its own window; closing it comes back here.
+el("task").onclick = () => {
+  const w = new WebviewWindow("task", { url: "site/experiment/", title: "転記タイピング実験", width: 1280, height: 820 });
+  w.once("tauri://error", async () => (await WebviewWindow.getByLabel("task"))?.setFocus()); // already open
+};
 
 listen<Status>("status", ({ payload: s }) => {
   if (document.body.dataset.state !== "stopping") setState(s.state);
@@ -159,8 +157,9 @@ listen<Live>("live", ({ payload: e }) => {
 // A baseline finished: it stops by itself and its result stays on the screen.
 listen<Baseline>("baseline", ({ payload: b }) => {
   document.body.dataset.done = "1";
-  show(br, b.br_bpm, true);
-  show(hr, b.hr_bpm, true);
+  // pale if the breathing was steady for less than half of the baseline: better taken again
+  show(br, b.br_bpm, b.steady_share >= 0.5);
+  show(hr, b.hr_bpm, b.steady_share >= 0.5);
 });
 
 listen<Stopped>("stopped", ({ payload }) => {
