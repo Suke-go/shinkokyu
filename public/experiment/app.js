@@ -5,7 +5,7 @@ const $ = (id) => document.getElementById(id);
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const show = (id) => {
-  for (const s of ["s-login", "s-ready", "s-task", "s-done"]) $(s).hidden = s !== id;
+  for (const s of ["s-login", "s-ready", "s-base", "s-task", "s-done"]) $(s).hidden = s !== id;
 };
 
 let exp = null, sessionId = null, pid = "", active = false;
@@ -40,14 +40,54 @@ const snapshot = (type = "snapshot") => {
    Heart/breathing estimates join this event log, so they share this page's clock, sync and upload. */
 const tauri = window.__TAURI__;
 const radar = (cmd, args) => { if (tauri) tauri.core.invoke(cmd, { session: sessionId, ...args }).catch(() => {}); };
+// The app also keeps the session on this PC (meta + events, the typing server's file format), whatever the upload does.
+let localMeta = null, localDir = "";
+const saveLocal = (name, text, append) => {
+  if (tauri && sessionId) tauri.core.invoke("save_typing", { session: sessionId, name, text, append }).then((dir) => { localDir = dir; }, () => {});
+};
+const saveLocalMeta = (patch) => {
+  if (!localMeta) return;
+  Object.assign(localMeta, patch);
+  saveLocal("json", JSON.stringify(localMeta), false);
+};
+const pageNow = () => performance.timeOrigin + performance.now();
+// Resting breathing measured before the task (minutes set on the app's first screen; 0 = none).
+const WHY = {
+  empty: "レーダーに何も映っていません。実験者に知らせてください",
+  static: "呼吸の動きが見えていません。実験者に知らせてください",
+  moving: "体が動いています。楽な姿勢で、じっとしていてください",
+  few: "そのまま、普通に呼吸していてください",
+  steady: "測定できています",
+};
+let recording = false; // the radar's estimates are being logged: from the start of the baseline to the end of the task
+const base = { rows: 0, steady: 0, breaths: [], hearts: [] }; // collected while the baseline runs
+const median = (v) => { const a = [...v].sort((x, y) => x - y); return a.length ? (a[(a.length - 1) >> 1] + a[a.length >> 1]) / 2 : null; };
 if (tauri) {
   const heart = $("st-radar");
   heart.hidden = false;
+  let lastBreath = 0;
+  tauri.event.listen("live", ({ payload: r }) => { $("base-why").textContent = WHY[r.quality_why] || ""; });
   tauri.event.listen("estimate", ({ payload: r }) => {
-    if (!active) return;
-    log("vital", null, JSON.stringify({ hr: r.hr_bpm, q: r.hr_q, br: r.br_bpm, span: r.span_mm, range: r.range_m, snr: r.snr_db, present: r.present }));
-    buf[buf.length - 1].t = r.t; // end of the 20 s the estimate covers, already on this page's clock
-    heart.classList.toggle("on", !!r.present); // off: the radar is running but nobody is in its beam
+    if (!recording) return;
+    if (!active) { // baseline
+      base.rows++;
+      if (r.quality === 3) base.steady++;
+      if (r.hr_bpm != null && r.hr_q >= 0.35) base.hearts.push(r.hr_bpm);
+    }
+    log("vital", null, JSON.stringify({
+      quality: r.quality, present: r.present, snr: r.snr_db, range: r.br_range_m,
+      br: r.br_bpm, period: r.br_period_s, depth: r.br_depth_mm, regular: r.br_q, moving: r.br_moving,
+      hr: r.hr_bpm, q: r.hr_q,
+    }));
+    buf[buf.length - 1].t = r.t; // the moment the estimate is for, already on this page's clock
+    for (const b of r.breaths) { // each breath once, stamped with the moment it ended
+      if (b.t <= lastBreath + 1000) continue;
+      lastBreath = b.t;
+      if (!active) base.breaths.push(b);
+      log("breath", null, JSON.stringify({ period: b.period_s, depth: b.depth_mm }));
+      buf[buf.length - 1].t = b.t;
+    }
+    heart.classList.toggle("on", r.quality >= 2); // off: the radar is running but no breathing person is in its beam
   });
   tauri.event.listen("status", () => heart.classList.remove("on")); // connecting or reconnecting
   window.addEventListener("pagehide", () => { if (sessionId) radar("stop"); });
@@ -135,6 +175,7 @@ async function drain(sid) {
 function flush() {
   if (!sessionId) return;
   if (buf.length) {
+    saveLocal("events.jsonl", buf.map((e) => JSON.stringify(e)).join("\n") + "\n", true);
     list(mem, sessionId).push({ seq: batchNo++, events: buf });
     buf = [];
     mirror("pending:", mem, sessionId);
@@ -164,6 +205,7 @@ try {
 
 // POST that must not be lost (sync results): retry until 2xx.
 async function postRetry(sync, tries = 20) {
+  if (localMeta) saveLocalMeta({ syncs: [...localMeta.syncs, sync] });
   for (let i = 0; i < tries; i++) {
     try { if ((await be.postSync(sessionId, sync)).ok) return true; } catch { /* retry */ }
     await sleep(1000);
@@ -173,7 +215,7 @@ async function postRetry(sync, tries = 20) {
 
 window.addEventListener("beforeunload", (e) => {
   const pending = sessionId && (pendingCount(sessionId) || buf.length);
-  if (active || pending) { e.preventDefault(); e.returnValue = ""; }
+  if (active || recording || pending) { e.preventDefault(); e.returnValue = ""; }
 });
 
 /* ---------- screens ---------- */
@@ -193,6 +235,10 @@ form.addEventListener("submit", async (ev) => {
     exp = await be.getExperiment(expId);
     if (!exp) return fail("実験IDが見つかりません", "expId");
     sessionId = await be.createSession(expId, p);
+    if (tauri) {
+      localMeta = { sessionId, expId, participantId: p, createdAt: pageNow(), startedAt: null, endedAt: null, sourceText: exp.text, finalText: null, userAgent: navigator.userAgent, backend: be.MODE, syncs: [] };
+      saveLocalMeta({});
+    }
     // hold the session lock for the page lifetime so other tabs' recovery never drains our queue
     if (navigator.locks) navigator.locks.request("session:" + sessionId, () => new Promise(() => {}));
     pid = p;
@@ -246,6 +292,30 @@ $("start-btn").addEventListener("click", async () => {
     $("ready-err").textContent = "時刻同期に失敗しました。続行します";
     $("st-dot").className = "dot bad";
   }
+  recording = true;
+  radar("start", { pageNow: pageNow() });
+  let seconds = 0;
+  try { seconds = tauri ? Number(localStorage.getItem("baselineMinutes") ?? 3) * 60 : 0; } catch { /* storage unavailable */ }
+  if (seconds > 0) { // the baseline lasts exactly this long; how steady the breathing was is recorded, not waited for
+    show("s-base");
+    log("baseline_start", null, JSON.stringify({ seconds }));
+    let skipped = false, done = 0;
+    $("base-skip").onclick = () => { skipped = true; };
+    for (const t0 = pageNow(); ;) {
+      done = (pageNow() - t0) / 1000;
+      if (done >= seconds || skipped) break;
+      $("base-bar").value = done / seconds;
+      const left = Math.ceil(seconds - done);
+      $("base-left").textContent = `あと ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
+      await sleep(250);
+    }
+    const periods = base.breaths.map((b) => b.period_s).sort((a, b) => a - b);
+    log("baseline_end", null, JSON.stringify({
+      seconds: Math.min(done, seconds), skipped, steady_share: base.rows ? base.steady / base.rows : null, breaths: periods.length,
+      period: median(periods), period_iqr: periods.length > 1 ? periods[Math.floor((periods.length - 1) * 0.75)] - periods[Math.floor((periods.length - 1) * 0.25)] : null,
+      depth: median(base.breaths.map((b) => b.depth_mm)), hr: median(base.hearts),
+    }));
+  }
   $("doc-title").textContent = exp.title;
   $("doc-pid").textContent = "参加者 " + pid;
   $("src").textContent = exp.text;
@@ -254,7 +324,8 @@ $("start-btn").addEventListener("click", async () => {
   active = true;
   updateCount();
   snapshot("session_start");
-  radar("start", { pageNow: performance.timeOrigin + performance.now() });
+  saveLocalMeta({ startedAt: pageNow() });
+  if (exp.limitMin > 0) setTimeout(() => finish(true), exp.limitMin * 60000); // the task ends by itself after this long
   ta.focus();
 });
 
@@ -271,16 +342,23 @@ for (const t of ["copy", "cut", "contextmenu", "selectstart", "dragstart"]) {
 $("finish-btn").addEventListener("click", () => { $("confirm").hidden = false; $("back-btn").focus(); });
 $("back-btn").addEventListener("click", () => { $("confirm").hidden = true; ta.focus(); });
 
-$("end-btn").addEventListener("click", async () => {
+$("end-btn").addEventListener("click", () => finish(false));
+async function finish(timeUp) {
+  if (!active) return; // already finishing: the limit and the button can both fire
+  if (timeUp) {
+    $("confirm-h").textContent = "時間になりました";
+    $("confirm").hidden = false;
+  }
   const line = $("end-line");
   $("end-btn").disabled = $("back-btn").disabled = true;
   const finalText = ta.value;
   snapshot();
   snapshot("session_end");
-  active = false;
+  active = recording = false;
   radar("stop");
   line.textContent = "データを送信しています…";
   flush();
+  saveLocalMeta({ finalText, endedAt: pageNow() });
   if (be.timeUrl || be.timeSource) try {
     const s = await syncClock({ phase: "end", url: be.timeUrl, ...be.timeSource });
     await postRetry(s);
@@ -299,13 +377,13 @@ $("end-btn").addEventListener("click", async () => {
     return;
   }
   if (fsOn()) document.exitFullscreen().catch(() => {});
-  $("done-id").textContent = sessionId;
-  if (be.MODE === "static") {
+  $("done-id").textContent = sessionId + (localDir ? `\nこの PC の保存先: ${localDir}` : "");
+  if (be.MODE === "static" && !tauri) {
     $("dl-btn").hidden = false;
     await download();
   }
   show("s-done");
-});
+}
 
 async function download() {
   try {

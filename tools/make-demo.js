@@ -7,7 +7,7 @@ import { dirname, join } from 'node:path';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const dir = join(root, 'data');
 const id = 'taskB_P00_demo';
-const source = JSON.parse(readFileSync(join(root, 'server', 'experiments.json'), 'utf8')).taskB.text;
+const source = JSON.parse(readFileSync(join(root, 'data', id + '.json'), 'utf8')).sourceText; // taskB is no longer offered as an experiment
 let rs = 42; const rnd = () => ((rs = (rs * 1664525 + 1013904223) >>> 0) / 2 ** 32);
 const between = (a, b) => a + rnd() * (b - a);
 

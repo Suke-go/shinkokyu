@@ -4,14 +4,18 @@ The chest's displacement is split by time scale: what a wide Gaussian follows is
 Gaussian follows on top of that is breathing, and what is left over holds the heartbeat.
 
 Steps (the usual ones for FMCW vital signs, e.g. Alizadeh et al., IEEE Access 2019; TI's vital signs lab):
+  0. A static reflection sharing the bin (a chair back when measuring from behind, clothing, a desk edge) is
+     subtracted where it is stronger than the moving one: left in, it shrinks and bends the phase swing.
   1. Chest velocity per range bin, from the phase step between frames summed over the antennas.
   2. Steps no breathing chest could make are clipped: they are phase jumps or the body shifting.
   3. Displacement, smoothed with a Gaussian (noise and heartbeat out) minus a wide Gaussian of itself
      (posture drift out). What is left is the breathing wave.
   4. The range bin whose wave repeats most regularly is taken as the chest, with the neighbours that move
      with it. The strongest reflection is often not the chest.
-  5. The wave is cut into breaths at its upward zero crossings. A stretch in which the body itself was
-     shifting is not counted as a breath.
+  5. The wave is cut into breaths at its rises: one rise and one fall, each a fair share of the recent
+     swings, make a breath, whatever level the wave sits at. A stretch in which the body itself was
+     shifting is not counted as a breath. Breaths faster than 35 a minute are not counted: at that speed
+     they are the size and nearly the rate of the heartbeat's motion, and this wave cannot tell them apart.
   6. Heart rate, after breathing and never against it: the spectrum of what the breathing smoother left
      over (as velocity), scored together with its second harmonic. A peak near the previous estimate is
      preferred if it is at least half as strong as the strongest: a heart rate does not jump 20 beats in 2 s.
@@ -29,10 +33,28 @@ JUMP_MM_S = 25.0  # a breathing chest stays under this
 # A deep breath in (10 mm in 1.3 s) just stays below. Provisional until checked against paced breathing.
 MOVE_MM_S = 12.0
 MIN_DEPTH_MM = 0.3  # shallower than this is not a breath
+SWING_SHARE, SWING_S = 0.3, 30.0  # a breath swings at least this share of the larger swings of the last SWING_S
 SELECT_S = 30.0  # the chest is looked for in this much data
-MIN_DB = 20  # bins reflecting less than this over the noise floor are not considered
+# The chest is looked for among the bins that reflect at least this much over the noise floor (an empty beam
+# shows 7-13 dB, a back 19-29, a chest 28-39) and lie within BODY_M of the strongest reflection: a weak bin far
+# from the body is noise, however regularly it happens to move.
+MIN_DB = 16
+BODY_M = 0.25
 HEART_S = 20.0  # heart rate is estimated over this much of the track
 HEART_HZ = (0.8, 2.5)  # 48 to 150 beats a minute
+
+
+def remove_static(z):
+    """z: complex samples of one range bin on one antenna. A moving reflector draws an arc around whatever
+    static reflection shares the bin; the arc's centre is that static part (least-squares circle fit).
+    It is subtracted only if the fit is a real arc and the static part is the stronger one."""
+    m = z.mean()
+    x, y = (z - m).real, (z - m).imag
+    sol, *_ = np.linalg.lstsq(np.c_[2 * x, 2 * y, np.ones(len(z))], x * x + y * y, rcond=None)
+    c = sol[0] + 1j * sol[1]
+    r = np.sqrt(max(sol[2] + abs(c) ** 2, 0.0))
+    arc = r > 0 and np.sqrt(np.mean((np.abs(z - m - c) - r) ** 2)) < 0.3 * r
+    return z - (m + c) if arc and abs(m + c) > r else z
 
 
 def gauss(x, sigma_s, fs):
@@ -72,27 +94,52 @@ def moving(vel, fs):
     return gauss(np.abs(vel), 0.5, fs) > MOVE_MM_S
 
 
+def turning_points(x, th):
+    """Indices where x turns, peaks and troughs in turn: a high point counts once x has fallen th[i] below
+    it, a low point once x has risen th[i] above it. Smaller wiggles pass unnoticed."""
+    turns, up, lo, hi = [], None, 0, 0
+    for i in range(1, len(x)):
+        if x[i] < x[lo]:
+            lo = i
+        if x[i] > x[hi]:
+            hi = i
+        if up is not False and x[hi] - x[i] >= th[i]:
+            turns.append(hi)
+            up, lo = False, i
+        elif up is not True and x[i] - x[lo] >= th[i]:
+            turns.append(lo)
+            up, hi = True, i
+    return turns
+
+
 def cut_breaths(x, fs, shifting=None):
     """Breathing wave -> [(start index, end index, depth mm)], one per breath.
 
-    A breath runs from one upward zero crossing to the next. In between, the wave must first rise above a
-    threshold and then dip below minus that threshold (about a quarter of the size of the recent
-    breathing, taken from the median so that one large movement does not raise it). Ripples around zero
-    lack one or the other and do not end a breath: the pause after a slow deep breath out is such a ripple.
+    A breath is one rise and one fall of the wave, wherever its level sits: breathing rides on what is left
+    of the posture drift, so the wave does not return to zero between breaths. To count, a rise or fall must
+    be at least SWING_SHARE of the larger swings of the last SWING_S (their 75th percentile; the rule of
+    Schaefer & Kratky 2008 for respiratory signals, with a larger share because a radar wave carries more
+    ripple than a chest belt): the ripple in the pause after a deep breath out is small next to that breath,
+    while a quiet breather's 1 mm swings are all there is and count. A breath runs from halfway up one
+    rise to halfway up the next, the steepest and so best-timed point of the wave.
     Stretches where `shifting` is True for more than a tenth of their length are dropped.
     """
-    block, span = int(5 * fs), int(15 * fs)
-    out, armed, start, lo, hi = [], False, None, 0.0, 0.0
+    floor = np.full(len(x), MIN_DEPTH_MM)
+    small = turning_points(x, floor)
+    at, size = np.array(small[1:], int), np.abs(np.diff(x[small]))
+    th, block = floor.copy(), int(5 * fs)
     for b0 in range(0, len(x), block):
-        h = max(0.35 * np.median(np.abs(x[max(b0 + block - span, 0) : b0 + block])), MIN_DEPTH_MM / 2)
-        for i in range(max(b0, 1), min(b0 + block, len(x))):
-            lo, hi = min(lo, x[i]), max(hi, x[i])
-            armed = armed or (x[i] < -h and (hi > h or start is None))  # the first breath has no known start
-            if armed and x[i - 1] <= 0 < x[i]:
-                still = shifting is None or shifting[start:i].mean() <= 0.1 if start is not None else False
-                if start is not None and MIN_S <= (i - start) / fs <= MAX_S and hi - lo >= MIN_DEPTH_MM and still:
-                    out.append((start, i, hi - lo))
-                start, armed, lo, hi = i, False, 0.0, 0.0
+        recent = size[(at <= b0 + block) & (at > b0 + block - int(SWING_S * fs))]
+        if len(recent) >= 3:
+            th[b0 : b0 + block] = max(SWING_SHARE * np.percentile(recent, 75), MIN_DEPTH_MM)
+    turns = turning_points(x, th)
+    marks = [a + int(np.argmax(x[a : b + 1] >= (x[a] + x[b]) / 2)) for a, b in zip(turns[:-1], turns[1:]) if x[b] > x[a]]
+    out = []
+    for a, e in zip(marks[:-1], marks[1:]):
+        depth = float(np.ptp(x[a : e + 1]))
+        still = shifting is None or shifting[a:e].mean() <= 0.1
+        if MIN_S <= (e - a) / fs <= MAX_S and depth >= MIN_DEPTH_MM and still:
+            out.append((a, e, depth))
     return out
 
 
@@ -134,6 +181,19 @@ def heart_rate(vel, fs, prev=None, breath_s=None):
     return float(fb[k] * 60), float(s[band][np.abs(fb - fb[k]) <= 0.1].sum() / s[band].sum()), float(fb[top] * 60)
 
 
+def follow(H, fs, mm_per_rad, rng, rmin, rmax):
+    """A whole recording, followed the way the live estimator follows it.
+    H: complex [time, bin, antenna]. -> (breathing wave mm, body-shifting mask, [(start, end, period s, depth mm)]),
+    one wave sample per frame step; start and end index into it."""
+    tracker = Breathing(fs, mm_per_rad, rng, rmin, rmax, keep_s=None)
+    hop, look = int(2 * fs), int(SELECT_S * fs)
+    wave, shifting = np.zeros(1), np.zeros(1, bool)
+    for end in range(min(int(10 * fs), len(H)), len(H) + 1, hop):
+        r = tracker.update(H[max(end - look, 0) : end], hop)
+        wave, shifting = r["wave"], r["shifting"]
+    return wave, shifting, [(a, e, (e - a) / fs, d) for a, e, d in cut_breaths(wave, fs, shifting)]
+
+
 class Breathing:
     """Follows the chest from update to update and keeps one continuous breathing wave."""
 
@@ -155,13 +215,16 @@ class Breathing:
         W = H[-int(SELECT_S * fs) :]
         amp = np.abs(W).mean(axis=(0, 2))
         db = 20 * np.log10(amp / np.percentile(amp[self.rng >= self.rmin], 20))
-        cand = np.flatnonzero((self.rng >= self.rmin) & (self.rng <= self.rmax) & (db >= MIN_DB))
+        near = (self.rng >= self.rmin) & (self.rng <= self.rmax)
+        body = self.rng[int(np.argmax(np.where(near, db, -np.inf)))]
+        cand = np.flatnonzero(near & (db >= MIN_DB) & (np.abs(self.rng - body) <= BODY_M))
         n_new = min(n_new, len(W) - 1) if self.vel else len(W) - 1
         if not len(cand):
             self.vel.extend([0.0] * n_new)
             self.chest = self.hr = None
-            return {"hr_bpm": None, "hr_q": 0.0, "hr_peak_bpm": None, "br_period_s": None, "br_bpm": None, "br_q": 0.0, "br_depth_mm": 0.0, "br_range_m": None, "br_moving": 0.0, "breaths": [], "wave": np.zeros(1), "shifting": np.zeros(1, bool)}
-        vel = np.angle((W[1:, cand] * W[:-1, cand].conj()).sum(axis=2)) * self.mm * fs
+            return {"hr_bpm": None, "hr_q": 0.0, "hr_peak_bpm": None, "br_period_s": None, "br_bpm": None, "br_q": 0.0, "br_depth_mm": 0.0, "br_range_m": None, "br_span_mm": 0.0, "br_moving": 0.0, "br_moving_now": 0.0, "breaths": [], "wave": np.zeros(1), "shifting": np.zeros(1, bool)}
+        W = np.stack([np.stack([remove_static(W[:, c, a]) for a in range(W.shape[2])], axis=1) for c in cand], axis=1)
+        vel = np.angle((W[1:] * W[:-1].conj()).sum(axis=2)) * self.mm * fs
         waves = np.array([breath_wave(v, fs) for v in vel.T])
         regular = np.array([period_of(w, fs)[1] for w in waves])
         best = int(regular.argmax())
@@ -197,8 +260,10 @@ class Breathing:
             "br_bpm": None if np.isnan(period) else 60 / period,
             "br_q": q,
             "br_depth_mm": float(np.median([b[2] for b in breaths])) if breaths else float(np.ptp(x[-recent:])),
+            "br_span_mm": float(2 * np.percentile(np.abs(x[-recent:]), 90)),  # how far the chest or back swings at all
             "br_range_m": float(self.rng[cand[group]].mean()),
             "br_moving": float(shifting[-recent:].mean()),  # share of the time the body itself was shifting
+            "br_moving_now": float(shifting[-int(10 * fs) :].mean()),  # the same over the last 10 s: what the quality goes by
             "breaths": breaths,
             "wave": x,
             "shifting": shifting,

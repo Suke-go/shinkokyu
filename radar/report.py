@@ -19,10 +19,10 @@ import matplotlib.font_manager
 import matplotlib.pyplot as plt
 import numpy as np
 
-from breathing import SELECT_S, Breathing, cut_breaths
+from breathing import follow
 
 N_ANT = 4
-Q_MIN, SNR_MIN_DB, SPAN_MIN_MM = 0.35, 26, 0.5  # README: when an estimate is usable
+Q_MIN, SNR_MIN_DB, SPAN_MIN_MM = 0.35, 16, 0.3  # README: when an estimate is usable
 RMAX_M = 1.5
 _fonts = {f.name for f in matplotlib.font_manager.fontManager.ttflist}
 plt.rcParams["font.family"] = [f for f in ("Yu Gothic", "Hiragino Sans", "Noto Sans CJK JP") if f in _fonts] + ["sans-serif"]
@@ -32,12 +32,12 @@ plt.rcParams["axes.spines.top"] = plt.rcParams["axes.spines.right"] = False
 REPO = Path(__file__).parent.parent
 
 
-def key_times(session_id):
-    """Times [ms, typing page's clock] of the keys pressed in a typing session: from the local server's
-    data folder if the session is there, else from Supabase. Empty if neither has it."""
-    local = REPO / "data" / f"{session_id}.events.jsonl"
+def key_times(session_id, folder):
+    """Times [ms, typing page's clock] of the keys pressed in a typing session: from the app's own copy
+    next to the radar recording, else the local server's data folder, else Supabase. Empty if none has it."""
+    local = next((f for f in (folder / f"typing_{session_id}.events.jsonl", REPO / "data" / f"{session_id}.events.jsonl") if f.exists()), None)
     try:
-        if local.exists():
+        if local:
             events = [json.loads(l) for l in local.read_text(encoding="utf-8").splitlines() if l.strip()]
         else:
             cfg = (REPO / "public/shared/config.js").read_text(encoding="utf-8")
@@ -70,7 +70,7 @@ def load(bin_path):
     for r in rows:
         r["s"] = (r["t"] - rec["t"][0]) / 1000
     # a recording made during a typing task is on the typing page's clock, the same clock as the key events
-    meta["keys_s"] = (key_times(meta["sessionId"]) - rec["t"][0]) / 1000 if meta.get("sessionId") else np.array([])
+    meta["keys_s"] = (key_times(meta["sessionId"], bin_path.parent) - rec["t"][0]) / 1000 if meta.get("sessionId") else np.array([])
     # chest strap logged alongside (strap.py): its mean rate over the same 20 s as each estimate
     rr_path = bin_path.with_suffix("").with_suffix(".rr.jsonl")
     notes = [json.loads(l) for l in rr_path.read_text().splitlines()] if rr_path.exists() else []
@@ -108,13 +108,8 @@ def summarize(meta, rec, H, rows):
     hr = np.array([r["hr_bpm"] for r in ok])
     gaps = np.diff(rec["t"])
     # the breathing wave over the whole session, followed the way the live estimator follows it
-    tracker = Breathing(fps, mm, rng, 0.3, RMAX_M, keep_s=None)
-    hop, look, filled = int(2 * fps), int(SELECT_S * fps), np.nan_to_num(H)
-    wave, shifting = np.zeros(1), np.zeros(1, bool)
-    for end in range(min(int(10 * fps), len(H)), len(H) + 1, hop):
-        r = tracker.update(filled[max(end - look, 0) : end], hop)
-        wave, shifting = r["wave"], r["shifting"]
-    breaths = [(e / fps, (e - a) / fps, d) for a, e, d in cut_breaths(wave, fps, shifting)]  # (end s, period s, depth mm)
+    wave, shifting, cut = follow(np.nan_to_num(H), fps, mm, rng, 0.3, RMAX_M)
+    breaths = [(e / fps, period, d) for _, e, period, d in cut]  # (end s, period s, depth mm)
     periods = np.array([b[1] for b in breaths])
     # typing: a frame counts as "typing" if a key was pressed in the 2 s up to it
     keys = meta["keys_s"]
@@ -228,8 +223,8 @@ def main():
     bins = sorted(b for a in args for b in ([a] if a.suffix == ".bin" else a.glob("*.bin")))
     print(f"{'session':40s} {'sec':>4s} {'fps':>3s} {'drop':>4s} {'usb':>3s} {'body m':>6s} {'still':>5s} {'fast':>5s} {'seen':>5s} {'breaths':>7s} {'period':>6s} {'iqr':>4s} {'depth':>5s} {'moved':>5s} {'HR ok':>5s} {'HR':>4s} {'vs strap':>8s}")
     for b in bins:
-        if b.stat().st_size == 0:
-            print(f"{b.stem:40s} empty (no frame arrived)")
+        if b.stat().st_size < 400_000:  # about 10 s of frames: the tracker has nothing to go by before that
+            print(f"{b.stem:40s} {'empty (no frame arrived)' if b.stat().st_size == 0 else 'too short (under 10 s)'}")
             continue
         meta, rec, H, rows = load(b)
         s = summarize(meta, rec, H, rows)
