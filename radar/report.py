@@ -37,6 +37,12 @@ def load(bin_path):
     rows = [json.loads(l) for l in bin_path.with_suffix("").with_suffix(".hr.jsonl").read_text().splitlines() if l.strip()]
     for r in rows:
         r["s"] = (r["t"] - rec["t"][0]) / 1000
+    # chest strap logged alongside (strap.py): its mean rate over the same 20 s as each estimate
+    rr_path = bin_path.with_suffix("").with_suffix(".rr.jsonl")
+    beats = [(n["t"], x) for n in map(json.loads, rr_path.read_text().splitlines()) for x in n["rr"]] if rr_path.exists() else []
+    for r in rows:
+        rr = [x for t, x in beats if r["t"] - r["window"] * 1000 < t <= r["t"]]
+        r["strap_bpm"] = 60000 / np.mean(rr) if len(rr) >= 10 else None
     return meta, rec, H, rows
 
 
@@ -79,6 +85,8 @@ def summarize(meta, rec, H, rows):
         "hr_median": float(np.median(hr)) if len(hr) else float("nan"),
         "hr_spread": float(np.subtract(*np.percentile(hr, [90, 10]))) if len(hr) > 1 else float("nan"),
         "span": float(np.median([r["span_mm"] for r in rows])) if rows else float("nan"),
+        # mean absolute difference from the strap, over the usable estimates
+        "err": float(np.mean([abs(r["hr_bpm"] - r["strap_bpm"]) for r in ok if r["strap_bpm"]])) if any(r["strap_bpm"] for r in ok) else float("nan"),
     }
 
 
@@ -126,8 +134,10 @@ def figure(name, s, rows, out):
     ax[2].scatter([r["s"] for r in bad], [r["hr_bpm"] for r in bad], s=28, facecolors="none", edgecolors="#8C959F", label="使えない推定")
     ax[2].scatter([r["s"] for r in good], [r["hr_bpm"] for r in good], s=28, color="#1F2328", label="使える推定")
     ax[2].plot([r["s"] for r in rows], [r["br_bpm"] for r in rows], color="#8C959F", lw=1, label="呼吸数")
+    if any(r["strap_bpm"] for r in rows):
+        ax[2].plot([r["s"] for r in rows if r["strap_bpm"]], [r["strap_bpm"] for r in rows if r["strap_bpm"]], color="#C2410C", lw=1.5, label="胸ストラップ")
     ax[2].set(ylabel="毎分", ylim=(0, 160), title="推定値：心拍数（点）と呼吸数（線）。各点は直前 20 秒についての値")
-    ax[2].legend(loc="upper right", frameon=False, fontsize=9, ncols=4)
+    ax[2].legend(loc="upper right", frameon=False, fontsize=9, ncols=5)
     ax[2].grid(axis="y", color="#E8ECF0")
 
     ax[3].plot([r["s"] for r in rows], [r["hr_q"] for r in rows], color="#1F2328", lw=1.5)
@@ -141,7 +151,7 @@ def figure(name, s, rows, out):
 def main():
     args = [Path(a) for a in sys.argv[1:]] or [Path(__file__).parent / "captures"]
     bins = sorted(b for a in args for b in ([a] if a.suffix == ".bin" else a.glob("*.bin")))
-    print(f"{'session':40s} {'sec':>4s} {'fps':>3s} {'drop':>4s} {'usb':>3s} {'body m':>6s} {'still':>5s} {'fast':>5s} {'seen':>5s} {'usable':>6s} {'HR':>5s} {'spread':>6s} {'chest mm':>8s}")
+    print(f"{'session':40s} {'sec':>4s} {'fps':>3s} {'drop':>4s} {'usb':>3s} {'body m':>6s} {'still':>5s} {'fast':>5s} {'seen':>5s} {'usable':>6s} {'HR':>5s} {'spread':>6s} {'chest mm':>8s} {'vs strap':>8s}")
     for b in bins:
         if b.stat().st_size == 0:
             print(f"{b.stem:40s} empty (no frame arrived)")
@@ -151,7 +161,7 @@ def main():
         figure(b.stem, s, rows, b.with_suffix(".report.png"))
         pct = lambda x: f"{x * 100:.0f}%"
         print(f"{b.stem:40s} {s['seconds']:4.0f} {s['fps']:3g} {s['dropped']:4d} {s['link_gaps']:3d} {s['body_m']:6.2f} {pct(s['still']):>5s} {pct(s['fast']):>5s} {pct(s['seen']) if rows else '-':>5s} "
-              f"{pct(s['usable']) if rows else '-':>6s} {s['hr_median']:5.0f} {s['hr_spread']:6.0f} {s['span']:8.1f}")
+              f"{pct(s['usable']) if rows else '-':>6s} {s['hr_median']:5.0f} {s['hr_spread']:6.0f} {s['span']:8.1f} {s['err']:8.1f}")
 
 
 if __name__ == "__main__":

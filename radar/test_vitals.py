@@ -48,4 +48,11 @@ H[:, b, :] += 2000  # a chair: strong, but it does not breathe
 r = v.analyze(H, 0.3, 1.5)
 assert not r["present"] and r["snr_db"] > v.SNR_MIN_DB and r["span_mm"] < 0.2, (r["snr_db"], r["span_mm"])
 
+# --- chest strap: Heart Rate Measurement packets (8-bit and 16-bit rate, with and without energy field)
+import strap
+
+assert strap.parse(bytes([0x10, 60, 0x00, 0x04, 0x00, 0x02])) == (60, [1000.0, 500.0])
+assert strap.parse(bytes([0x19, 0x2C, 0x01, 9, 9, 0x00, 0x04])) == (300, [1000.0])
+assert strap.parse(bytes([0x00, 72])) == (72, [])
+
 print("ok")

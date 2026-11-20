@@ -12,6 +12,8 @@ import http.client
 import json
 import re
 import struct
+import subprocess
+import sys
 import time
 from collections import deque
 from pathlib import Path
@@ -297,6 +299,7 @@ def main():
     ap.add_argument("--server", default="http://127.0.0.1:8787", help="typing server to sync the clock with")
     ap.add_argument("--backend", choices=["auto", "server", "supabase"], default="auto",
                     help="clock to sync with; must match the typing page's mode (auto = server if it answers, else supabase)")
+    ap.add_argument("--strap", action="store_true", help="also log a Bluetooth chest strap (strap.py) as the reference")
     ap.add_argument("--out", default=str(HERE / "captures"))
     args = ap.parse_args()
 
@@ -318,6 +321,7 @@ def main():
         Path(f"{stem}.json").write_text(json.dumps(meta))
 
     sync("start")
+    strap = subprocess.Popen([sys.executable, str(HERE / "strap.py"), f"{stem}.rr.jsonl"]) if args.strap else None
     win = int(args.window * FRAME_HZ)
     window = deque(maxlen=win)  # (fnum, complex H)
     anchor, last_fnum, last, result, configured = np.inf, -1, 0.0, None, False
@@ -378,6 +382,8 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        if strap:
+            strap.terminate()
         sync("end")
     if result:
         save_plot(result, f"{stem}.png")

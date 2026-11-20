@@ -80,6 +80,20 @@ import vitals  # radar/vitals.py
 rec = np.fromfile("radar_20261115-101247.bin", dtype=vitals.REC)
 ```
 
+## 胸ストラップと比べる
+
+レーダーの値が合っているかは、胸ストラップ（拍ごとの間隔を出す Bluetooth 心拍計。Polar H9/H10、Garmin HRM-Dual、Wahoo TICKR など）を同時に記録して確かめる。
+
+```
+pip install bleak
+python radar/vitals.py --strap --seconds 300   # レーダーとストラップを同時に記録
+python radar/strap.py                          # ストラップだけ（アプリで測るときに並べて動かす）
+```
+
+ストラップは先に身に着け（肌に触れると電源が入る）、スマートフォンのアプリとの接続は切っておく。PC の Bluetooth はオンにする。拍ごとの間隔が `.rr.jsonl` に 1 秒ごとに追記される（`{"t": 到着時刻 ms, "hr": 毎分, "rr": [間隔 ms, ...]}`）。
+
+`report.py` は、`.bin` と同じ名前の `.rr.jsonl` があれば、図にストラップの心拍数を重ね、要約の `vs strap` に使える推定との差（平均絶対差、毎分）を出す。
+
 ## 記録の様子を見る
 
 ```
