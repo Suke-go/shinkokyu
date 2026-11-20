@@ -43,8 +43,9 @@ pub struct Options {
     pub stem: Option<PathBuf>,
 }
 
-/// Measure until `stop` is set. Events for the UI: "status" {state, text?, progress?} and
-/// "estimate" {t, window, ...Estimate, disp}.
+/// Measure until `stop` is set. Events for the UI: "status" {state, text?, progress?},
+/// "seen" {db} twice a second (reflection per range bin from RMIN_M to RMAX_M, in dB over
+/// the noise floor: what the radar is pointed at right now) and "estimate" {t, window, ...Estimate, disp}.
 pub fn measure(opts: &Options, stop: &AtomicBool, emit: &dyn Fn(&str, Value)) -> Result<(), String> {
     let es = |e: std::io::Error| e.to_string();
     let chirp = Chirp::load();
@@ -67,6 +68,8 @@ pub fn measure(opts: &Options, stop: &AtomicBool, emit: &dyn Fn(&str, Value)) ->
     let win = (WINDOW_S * chirp.frame_hz) as usize;
     let mut window: VecDeque<(u32, Vec<u8>)> = VecDeque::with_capacity(win);
     let (mut anchor, mut last_fnum, mut configured, mut last_est) = (f64::INFINITY, None::<u32>, false, Instant::now());
+    let (first_bin, end_bin) = ((RMIN_M / chirp.range_res).ceil() as usize, (RMAX_M / chirp.range_res) as usize + 1);
+    let (mut seen, mut seen_frames, mut last_seen) = (vec![0.0; chirp.n_bins], 0, Instant::now());
 
     let result = loop {
         // one connection; a knock on the USB cable ends it with Fail::Retry
@@ -102,6 +105,10 @@ pub fn measure(opts: &Options, stop: &AtomicBool, emit: &dyn Fn(&str, Value)) ->
                             window.clear();
                         }
                         last_fnum = Some(fnum);
+                        for (b, bin) in iq.chunks_exact(N_ANT * 4).enumerate() {
+                            seen[b] += bin.chunks_exact(4).map(|c| (i16::from_le_bytes([c[2], c[3]]) as f64).hypot(i16::from_le_bytes([c[0], c[1]]) as f64)).sum::<f64>();
+                        }
+                        seen_frames += 1;
                         // Earliest arrival relative to the radar's own frame clock = least USB delay.
                         // shortcut: still ~15-20 ms late (frame processing + UART) and ignores crystal
                         // drift (~50 ppm), upgrade if beat-level timing is needed.
@@ -110,6 +117,13 @@ pub fn measure(opts: &Options, stop: &AtomicBool, emit: &dyn Fn(&str, Value)) ->
                             window.pop_front();
                         }
                         window.push_back((fnum, iq));
+                    }
+                    if last_seen.elapsed() >= Duration::from_millis(500) && seen_frames > 0 {
+                        let floor = vitals::noise_floor(&seen, first_bin);
+                        let db: Vec<f64> = seen[first_bin..end_bin].iter().map(|a| 20.0 * (a / floor).max(1.0).log10()).collect();
+                        emit("seen", json!({ "db": db }));
+                        seen.fill(0.0);
+                        (seen_frames, last_seen) = (0, Instant::now());
                     }
                     if last_est.elapsed() < Duration::from_secs(2) {
                         continue;
@@ -165,14 +179,28 @@ struct Running {
 #[derive(Default)]
 struct AppState(Mutex<Option<Running>>);
 
+/// UTC `YYYYMMDD-HHMMSS`, the stamp vitals.py and the typing server's session ids use.
+fn utc_stamp(secs: u64) -> String {
+    // days -> civil date (Howard Hinnant's algorithm)
+    let z = (secs / 86400) as i64 + 719_468;
+    let (era, doe) = (z.div_euclid(146_097), z.rem_euclid(146_097));
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let (d, m) = (doy - (153 * mp + 2) / 5 + 1, if mp < 10 { mp + 3 } else { mp - 9 });
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    let s = secs % 86400;
+    format!("{y:04}{m:02}{d:02}-{:02}{:02}{:02}", s / 3600, s % 3600 / 60, s % 60)
+}
+
 /// Same rule as the typing server's session ids; the id becomes part of a file name.
 fn valid_session_id(id: &str) -> bool {
     (1..=160).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-/// Without arguments: show estimates only (aiming the radar). With a typing session and that
-/// page's current clock reading: also record, into Documents/shinkokyu-radar/radar_<session>.*,
-/// on the page's clock.
+/// Records into Documents/shinkokyu-radar. With a typing session and that page's current clock
+/// reading: radar_<session>.*, stamped on the page's clock. Without (the aiming screen):
+/// radar_<UTC stamp>.*, stamped on this PC's clock.
 #[tauri::command(async)]
 fn start(app: tauri::AppHandle, state: tauri::State<AppState>, session: Option<String>, page_now: Option<f64>) -> Result<(), String> {
     let clock = Clock::new();
@@ -186,15 +214,13 @@ fn start(app: tauri::AppHandle, state: tauri::State<AppState>, session: Option<S
         r.stop.store(true, Relaxed);
         let _ = r.thread.join();
     }
-    let stem = match &session {
-        Some(id) if valid_session_id(id) => {
-            let dir = app.path().document_dir().map_err(|e| e.to_string())?.join("shinkokyu-radar");
-            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-            Some(dir.join(format!("radar_{id}")))
-        }
-        Some(_) => return Err("invalid session id".into()),
-        None => None,
-    };
+    if session.as_ref().is_some_and(|id| !valid_session_id(id)) {
+        return Err("invalid session id".into());
+    }
+    let dir = app.path().document_dir().map_err(|e| e.to_string())?.join("shinkokyu-radar");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let name = session.clone().unwrap_or_else(|| utc_stamp(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()));
+    let stem = Some(dir.join(format!("radar_{name}")));
     let opts = Options { clock, clock_offset_ms, session_id: session.clone(), stem };
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();
@@ -237,6 +263,12 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn utc_stamp_matches_the_calendar() {
+        assert_eq!(super::utc_stamp(1_794_737_049), "20261115-100409");
+        assert_eq!(super::utc_stamp(951_782_400), "20000229-000000");
+    }
+
     #[test]
     fn session_ids_are_safe_file_names() {
         assert!(super::valid_session_id("demo-ja_P01_20261115-100409"));

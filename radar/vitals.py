@@ -12,6 +12,8 @@ import http.client
 import json
 import re
 import struct
+import subprocess
+import sys
 import time
 from collections import deque
 from pathlib import Path
@@ -21,12 +23,18 @@ import numpy as np
 import serial
 from serial.tools import list_ports
 
+from breathing import SELECT_S, Breathing
+
 HERE = Path(__file__).parent
 C = 299792458.0
 MAGIC = bytes([2, 1, 4, 3, 6, 5, 8, 7])
 HEADER = struct.Struct("<8I")  # fields after the magic word
 TLV_AZIMUTH_STATIC_HEATMAP = 4
 N_ANT = 4
+# A person in the beam: a reflection well above the noise floor (a body gives 28-39 dB, an empty beam
+# 7-13 dB) that also moves with breathing (millimetres; a chair or a wall stays within 0.2 mm).
+SNR_MIN_DB = 26
+SPAN_MIN_MM = 0.5
 
 CONFIG = [l.strip() for l in (HERE / "chirp.cfg").read_text().splitlines() if l.strip() and not l.startswith("%")]
 _profile = next(l for l in CONFIG if l.startswith("profileCfg")).split()
@@ -217,6 +225,8 @@ def analyze(H, rmin, rmax):
     motion = (np.abs(ac) ** 2).mean(axis=(0, 2))
     motion[(rng < rmin) | (rng > rmax)] = 0
     bins = np.flatnonzero(motion >= 0.25 * motion.max())
+    amp = np.abs(H).mean(axis=(0, 2))
+    snr_db = 20 * np.log10(amp[bins].max() / np.percentile(amp[rng >= rmin], 20))
     # Frame-to-frame phase step, power-weighted over the body's range bins and all antennas,
     # so a fade in one bin or antenna carries little weight.
     dphi = np.angle((H[1:, bins] * H[:-1, bins].conj()).sum(axis=(1, 2)))
@@ -228,6 +238,8 @@ def analyze(H, rmin, rmax):
     # Heart rate from velocity: breathing is far larger than the heartbeat in displacement.
     hr_f, hr_q, hr_sig, hr_spec = band_peak(dphi * mm * FRAME_HZ, 0.8, 2.5)
     return {
+        "present": bool(snr_db >= SNR_MIN_DB and np.ptp(br_sig) >= SPAN_MIN_MM),
+        "snr_db": float(snr_db),
         "range_m": float(rng[bins] @ motion[bins] / motion[bins].sum()),
         "span_mm": float(np.ptp(br_sig)),
         "br_bpm": float(br_f * 60),
@@ -243,18 +255,17 @@ def analyze(H, rmin, rmax):
 
 
 def describe(r):
-    notes = []
-    if r["span_mm"] < 0.2:
-        notes.append("almost no chest motion: nobody in range?")
-    if r["hr_q"] < 0.35:
-        notes.append("HR peak weak")
-    if r["hr_harmonic"]:
-        notes.append("HR peak sits on a breathing harmonic")
-    return (
-        f"range {r['range_m']:.2f} m | breathing {r['br_bpm']:4.1f}/min "
-        f"(chest {r['span_mm']:.2f} mm) | heart {r['hr_bpm']:5.1f} bpm (q={r['hr_q']:.2f})"
-        + (f"  [{'; '.join(notes)}]" if notes else "")
-    )
+    """One line for a row of the .hr.jsonl."""
+    if not r["present"]:
+        what = "nothing in the beam" if r["snr_db"] < SNR_MIN_DB else "something in the beam, but it does not breathe"
+        return f"no person: {what} (reflection {r['snr_db']:.0f} dB over the floor, motion {r['span_mm']:.2f} mm). Re-aim the radar"
+    if r["br_period_s"] is None:
+        breathing = "breathing: no regular cycle yet"
+    else:
+        last = " ".join(f"{b['period_s']:.1f}" for b in r["breaths"][-6:])
+        breathing = f"breathing {r['br_period_s']:.1f} s a breath ({r['br_bpm']:.1f}/min), {r['br_depth_mm']:.1f} mm deep, regularity {r['br_q']:.2f}, last breaths [{last}] s"
+    heart = "heart: -" if r["hr_bpm"] is None else f"heart {r['hr_bpm']:.0f} bpm" + ("" if r["hr_q"] >= 0.35 else " (unreliable)")
+    return f"{r['br_range_m'] or r['range_m']:.2f} m ({r['snr_db']:.0f} dB) | {breathing} | {heart}"
 
 
 def save_plot(r, path):
@@ -288,6 +299,7 @@ def main():
     ap.add_argument("--server", default="http://127.0.0.1:8787", help="typing server to sync the clock with")
     ap.add_argument("--backend", choices=["auto", "server", "supabase"], default="auto",
                     help="clock to sync with; must match the typing page's mode (auto = server if it answers, else supabase)")
+    ap.add_argument("--strap", action="store_true", help="also log a Bluetooth chest strap (strap.py) as the reference")
     ap.add_argument("--out", default=str(HERE / "captures"))
     args = ap.parse_args()
 
@@ -309,9 +321,11 @@ def main():
         Path(f"{stem}.json").write_text(json.dumps(meta))
 
     sync("start")
+    strap = subprocess.Popen([sys.executable, str(HERE / "strap.py"), f"{stem}.rr.jsonl"]) if args.strap else None
     win = int(args.window * FRAME_HZ)
-    window = deque(maxlen=win)  # (fnum, complex H)
-    anchor, last_fnum, last, result, configured = np.inf, -1, 0.0, None, False
+    window = deque(maxlen=max(win, int(SELECT_S * FRAME_HZ)))  # (fnum, complex H): breathing looks further back than the heart rate
+    breath = Breathing(FRAME_HZ, WAVELENGTH / (4 * np.pi) * 1e3, np.arange(N_SAMPLES) * RANGE_RES, args.rmin, args.rmax)
+    anchor, last_fnum, last, result, configured, est_fnum = np.inf, -1, 0.0, None, False, None
     t0 = time.time()
     done = lambda: args.seconds and time.time() - t0 >= args.seconds
     try:
@@ -338,6 +352,8 @@ def main():
                                     if fnum < last_fnum:  # sensor was restarted: new frame clock
                                         anchor = np.inf
                                         window.clear()
+                                        breath.reset()
+                                        est_fnum = None
                                     last_fnum = fnum
                                     # Earliest arrival relative to the radar's own frame clock = least USB delay.
                                     # shortcut: still ~15-20 ms late (frame processing + UART) and ignores crystal
@@ -351,12 +367,18 @@ def main():
                                         print(f"collecting... {len(window)}/{win} frames", flush=True)
                                         continue
                                     fnums = [f for f, _ in window]
-                                    result = analyze(fill_gaps(fnums, np.array([h for _, h in window])), args.rmin, args.rmax)
+                                    H = fill_gaps(fnums, np.array([h for _, h in window]))
+                                    result = analyze(H[-win:], args.rmin, args.rmax)
+                                    b = breath.update(H, fnums[-1] - est_fnum if est_fnum is not None else len(H))
+                                    est_fnum = fnums[-1]
                                     row = {"t": anchor + fnums[-1] * FRAME_MS, "window": args.window}
                                     row.update({k: v for k, v in result.items() if not isinstance(v, (np.ndarray, tuple))})
+                                    row.update({k: v for k, v in b.items() if k.startswith(("br_", "hr_"))})  # breathing and heart rate from the one chest track
+                                    # each breath that ended in the last 30 s: when it ended, how long it took, how deep it was
+                                    row["breaths"] = [{"t": row["t"] - ago * 1000, "period_s": p, "depth_mm": d} for ago, p, d in b["breaths"]]
                                     hr_log.write(json.dumps(row) + "\n")
                                     hr_log.flush()
-                                    print(describe(result), flush=True)
+                                    print(describe(row), flush=True)
                         finally:
                             try:
                                 cli_send(cli, "sensorStop", 2)
@@ -369,6 +391,8 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        if strap:
+            strap.terminate()
         sync("end")
     if result:
         save_plot(result, f"{stem}.png")

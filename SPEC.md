@@ -90,7 +90,7 @@ export function makeOffsetFn(syncs) // syncs=meta.syncs → (tLocal)=>tUtc。sta
 - `t`: **ローカル時刻** = `performance.timeOrigin + e.timeStamp`（小数ms）。UTC 変換は解析側で `t + offset`（§3）。Date.now() はイベント毎に使わない。
 - `seq`: セッション内の通し番号（0 始まり）。
 - `type`: `keydown` `keyup` `input` `compositionstart` `compositionupdate` `compositionend` `paste` `focus` `blur` `snapshot` `session_start` `session_end` `vital`
-- `vital`: デスクトップアプリ（§5.5）内でのみ発生。レーダーの 2 秒毎の推定。`t` は推定が対象とする 20 秒窓の終端（このページのローカル時刻）、`data` は JSON 文字列 `{"hr","q","br","span","range"}`。metrics.js は無視する。
+- `vital`: デスクトップアプリ（§5.5）内でのみ発生。レーダーの 2 秒毎の推定。`t` は推定が対象とする 20 秒窓の終端（このページのローカル時刻）、`data` は JSON 文字列 `{"hr","q","br","span","range","snr","present"}`（`present` = 人が映っている: `snr` ≥ 26 dB かつ `span` ≥ 0.5 mm。false の行は使わない）。metrics.js は無視する。
 - `key`,`code`,`repeat`: keydown/keyup のみ。他は null。
 - `blocked`: keydown のみ。ショートカット抑止で preventDefault した場合 true（それ以外は欠落）。
 - `isComposing`: KeyboardEvent/InputEvent の値。他は false。
@@ -162,13 +162,13 @@ offsetFn(tLocal) → UTC ms（§3 の補正）。
 
 デスクトップアプリ（`radar/app`、Tauri: Rust + TS）と `radar/vitals.py` の 2 実装。チャープ設定は `radar/chirp.cfg` を共有し、推定方法・ファイル形式は同一。使い方は `radar/README.md`。
 
-- アプリ: Pages 版のサイト（§5.3、Supabase モード）を同梱し、タイピング課題を別ウィンドウで開く。課題の `session_start` で `start {session, pageNow}` を呼び、アプリは自分の時計とページの時計（`pageNow`）の差を取って、以後の時刻をページのローカル時刻で付ける。推定は `vital` イベント（§4）としてページのイベント列に入るので、**時刻同期と保存はタイピングのセッションの 1 系統だけ**。生データは「ドキュメント/shinkokyu-radar/radar_<sessionId>.*」。最初の画面（向き合わせ）は推定を表示するだけで保存しない。
+- アプリ: Pages 版のサイト（§5.3、Supabase モード）を同梱し、タイピング課題を別ウィンドウで開く。課題の `session_start` で `start {session, pageNow}` を呼び、アプリは自分の時計とページの時計（`pageNow`）の差を取って、以後の時刻をページのローカル時刻で付ける。推定は `vital` イベント（§4）としてページのイベント列に入るので、**時刻同期と保存はタイピングのセッションの 1 系統だけ**。生データは「ドキュメント/shinkokyu-radar/radar_<sessionId>.*」。最初の画面（向き合わせ）で測ったときは `radar_<UTC stamp>.*` に、この PC の時計（同期なし）で保存する。
 - `vitals.py`: 単独記録。下記の「時刻」のとおり自分で同期する。
 
 - 機材: PTM RFR79ITR34-30U（TI IWR1843、mmWave SDK 3.5 標準デモ FW、FT4232H: チャネル A = CLI 115200bps / B = データ 921600bps）。77.0–80.82GHz、1TX/4RX、64 距離ビン（約 4.8cm）、40 フレーム/秒（位相が折り返さない上限 38mm/s）。1 フレーム = 0.75ms 間隔の 16 チャープ（12ms）で、その和（ゼロドップラー）を使うため約 8cm/s より速い動き（打鍵中の手・腕）は打ち消される。
-- 取得: 標準デモの range-azimuth heatmap TLV（ゼロドップラーの距離ビン複素値）。動きの大きい距離ビン（最大の 25% 以上）× 4 アンテナについて、フレーム間の位相差を電力重みで合成 → 速度、その累積 = 変位。呼吸 0.1–0.6Hz（変位）、心拍 0.8–2.5Hz（速度）について、直線トレンド除去 + Hann 窓のスペクトルから帯域内で最大の極大点を取る。直近 `window` 秒（既定 20）を 2 秒毎に推定。`hr_q`（ピーク ±0.1Hz の電力比）< 0.35 の値は信用しない。
+- 取得: 標準デモの range-azimuth heatmap TLV（ゼロドップラーの距離ビン複素値）。動きの大きい距離ビン（最大の 25% 以上）× 4 アンテナについて、フレーム間の位相差を電力重みで合成 → 速度、その累積 = 変位。呼吸 0.1–0.6Hz（変位）、心拍 0.8–2.5Hz（速度）について、直線トレンド除去 + Hann 窓のスペクトルから帯域内で最大の極大点を取る。直近 `window` 秒（既定 20）を 2 秒毎に推定。`hr_q`（ピーク ±0.1Hz の電力比）< 0.35 の値は信用しない。 人が映っているか（`present`）は、測定ビンの反射振幅が雑音床（0.3m 以遠のビンの振幅の 20 パーセンタイル）より 26dB 以上強く、かつ呼吸帯域の変位の振れ幅が 0.5mm 以上であること。false の推定は雑音なので使わない。アプリは 0.5 秒毎に距離ビン毎の反射（雑音床比 dB）を `seen` イベントで画面に出す（向き合わせ用）。記録の様子は `radar/report.py` で図と要約にできる。
 - 時刻（`vitals.py`）: §3.B と同じ方式で開始時・終了時に同期し、`.json` の `syncs` に §3 と同形（+ `source`）で保存（`makeOffsetFn` がそのまま使える）。同期先は backend.js と同じ選び方: `/api/time` が応答すれば server、無ければ Supabase `rpc/server_time`。突き合わせるタイピング画面と同じ同期先にする（`--backend`）。**記録時刻は生のローカル ms**、補正は解析時（§3 と同じ方針）。タイピングのセッションとは UTC の重なりで突き合わせる。
-- ファイル `radar_<sessionId または UTC stamp>.*`（アプリ: ドキュメント/shinkokyu-radar、`vitals.py`: `radar/captures`）: `.json`（設定。アプリは sessionId、`vitals.py` は syncs）/ `.bin`（全フレーム。固定長レコード `t` float64 到着ローカル ms, `fnum` uint32, `iq` int16[64][4][imag,real]）/ `.hr.jsonl`（`{t, window, range_m, span_mm, br_bpm, br_q, hr_bpm, hr_q, hr_harmonic}`。`t` は窓の終端、値は (t−window, t] の推定）/ `.png`（`vitals.py` のみ。最後の窓の波形）。
+- ファイル `radar_<sessionId または UTC stamp>.*`（アプリ: ドキュメント/shinkokyu-radar、`vitals.py`: `radar/captures`）: `.json`（設定。アプリは sessionId、`vitals.py` は syncs）/ `.bin`（全フレーム。固定長レコード `t` float64 到着ローカル ms, `fnum` uint32, `iq` int16[64][4][imag,real]）/ `.hr.jsonl`（`{t, window, present, snr_db, range_m, span_mm, br_bpm, br_q, hr_bpm, hr_q, hr_harmonic}`。`t` は窓の終端、値は (t−window, t] の推定）/ `.png`（`vitals.py` のみ。最後の窓の波形）。
 - フレーム時刻 = レーダーのフレーム番号 × 25ms + 最小遅延の到着時刻で決めた基準。残差は約 15–20ms の遅れ（フレーム処理 + UART）と水晶ドリフト。
 
 ## 6. デザイン

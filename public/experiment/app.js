@@ -45,9 +45,9 @@ if (tauri) {
   heart.hidden = false;
   tauri.event.listen("estimate", ({ payload: r }) => {
     if (!active) return;
-    log("vital", null, JSON.stringify({ hr: r.hr_bpm, q: r.hr_q, br: r.br_bpm, span: r.span_mm, range: r.range_m }));
+    log("vital", null, JSON.stringify({ hr: r.hr_bpm, q: r.hr_q, br: r.br_bpm, span: r.span_mm, range: r.range_m, snr: r.snr_db, present: r.present }));
     buf[buf.length - 1].t = r.t; // end of the 20 s the estimate covers, already on this page's clock
-    heart.classList.add("on");
+    heart.classList.toggle("on", !!r.present); // off: the radar is running but nobody is in its beam
   });
   tauri.event.listen("status", () => heart.classList.remove("on")); // connecting or reconnecting
   window.addEventListener("pagehide", () => { if (sessionId) radar("stop"); });

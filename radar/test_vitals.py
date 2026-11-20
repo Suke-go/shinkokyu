@@ -33,12 +33,60 @@ t = np.arange(int(30 * v.FRAME_HZ)) / v.FRAME_HZ
 d = 3e-3 * np.sin(2 * np.pi * 0.3 * t) + 0.1e-3 * np.sin(2 * np.pi * 1.15 * t)
 b = round(0.6 / v.RANGE_RES)
 shape = (len(t), v.N_SAMPLES, v.N_ANT)
-H = 300 * (rng.standard_normal(shape[1:]) + 1j * rng.standard_normal(shape[1:])) + 5 * (rng.standard_normal(shape) + 1j * rng.standard_normal(shape))
+H = 30 * (rng.standard_normal(shape[1:]) + 1j * rng.standard_normal(shape[1:])) + 5 * (rng.standard_normal(shape) + 1j * rng.standard_normal(shape))
 H[:, b, :] += 2000 * np.exp(1j * 4 * np.pi * d / v.WAVELENGTH)[:, None]
 r = v.analyze(H, 0.3, 1.5)
 assert abs(r["range_m"] - 0.6) < v.RANGE_RES, r["range_m"]
 assert abs(r["br_bpm"] - 18) < 1.5, r["br_bpm"]
 assert abs(r["hr_bpm"] - 69) < 3, r["hr_bpm"]
 assert r["hr_q"] > 0.5, r["hr_q"]
+assert r["present"] and r["snr_db"] > v.SNR_MIN_DB, r["snr_db"]
+H[:, b, :] -= 2000 * np.exp(1j * 4 * np.pi * d / v.WAVELENGTH)[:, None]  # nobody there
+r = v.analyze(H, 0.3, 1.5)
+assert not r["present"] and r["snr_db"] < 15, r["snr_db"]
+H[:, b, :] += 2000  # a chair: strong, but it does not breathe
+r = v.analyze(H, 0.3, 1.5)
+assert not r["present"] and r["snr_db"] > v.SNR_MIN_DB and r["span_mm"] < 0.2, (r["snr_db"], r["span_mm"])
+
+# --- breathing: 15 a minute (3 mm) for 60 s, then 7.5 a minute (6 mm); a reflector 3 bins further is stronger but only wanders
+import breathing as br
+
+t = np.arange(int(120 * v.FRAME_HZ)) / v.FRAME_HZ
+f = np.where(t < 60, 0.25, 0.125)
+d = np.where(t < 60, 1.5e-3, 3e-3) * np.sin(2 * np.pi * np.cumsum(f) / v.FRAME_HZ) + 0.1e-3 * np.sin(2 * np.pi * 1.15 * t)
+shape = (len(t), v.N_SAMPLES, v.N_ANT)
+H = 5 * (rng.standard_normal(shape) + 1j * rng.standard_normal(shape))
+H[:, b, :] += 1500 * np.exp(1j * 4 * np.pi * d / v.WAVELENGTH)[:, None]
+H[:, b + 3, :] += 4000 * np.exp(1j * 4 * np.pi * 2e-3 * np.cumsum(rng.standard_normal(len(t))) / 40 / v.WAVELENGTH)[:, None]
+tracker = br.Breathing(v.FRAME_HZ, v.WAVELENGTH / (4 * np.pi) * 1e3, np.arange(v.N_SAMPLES) * v.RANGE_RES, 0.3, 1.5)
+hop, look = int(2 * v.FRAME_HZ), int(br.SELECT_S * v.FRAME_HZ)
+seen = {}
+for end in range(int(20 * v.FRAME_HZ), len(t) + 1, hop):
+    seen[end / v.FRAME_HZ] = tracker.update(H[max(end - look, 0) : end], hop)
+r = seen[50.0]
+assert abs(r["br_period_s"] - 4.0) < 0.3 and abs(r["br_depth_mm"] - 3.0) < 0.6, (r["br_period_s"], r["br_depth_mm"])
+assert abs(r["br_range_m"] - 0.6) < v.RANGE_RES, r["br_range_m"]  # the chest, not the stronger reflector
+assert all(abs(p - 4.0) < 0.4 for _, p, _ in r["breaths"]), r["breaths"]
+assert abs(r["hr_bpm"] - 69) < 3 and r["hr_q"] > 0.35, (r["hr_bpm"], r["hr_q"])  # the 0.1 mm heartbeat, from the same track
+r = seen[110.0]
+assert abs(r["br_period_s"] - 8.0) < 0.6 and abs(r["br_depth_mm"] - 6.0) < 1.2, (r["br_period_s"], r["br_depth_mm"])
+
+# --- breathing first: a heart-band peak on a breathing harmonic is not a heart rate
+fs = v.FRAME_HZ
+ts = np.arange(int(20 * fs)) / fs
+harmonic = 2 * np.pi * 1.0 * 0.3 * np.cos(2 * np.pi * 1.0 * ts)  # velocity of a 0.3 mm wobble at 1.0 Hz = 4th harmonic of a 4 s breath
+assert abs(br.heart_rate(harmonic, fs)[0] - 60) < 2
+assert br.heart_rate(harmonic, fs, breath_s=4.0)[0] is None
+assert abs(br.heart_rate(harmonic, fs, prev=61, breath_s=4.0)[0] - 60) < 2  # it was the heart rate a moment ago: it stays
+beat = harmonic + 2 * np.pi * 1.2 * 0.1 * np.cos(2 * np.pi * 1.2 * ts)  # plus a weaker real heartbeat at 72
+assert br.heart_rate(beat, fs, breath_s=4.0)[0] is None  # nothing says which one is the heart
+assert abs(br.heart_rate(beat, fs, prev=74, breath_s=4.0)[0] - 72) < 2  # the last value does
+
+# --- chest strap: Heart Rate Measurement packets (8-bit and 16-bit rate, with and without energy field)
+import strap
+
+assert strap.parse(bytes([0x10, 60, 0x00, 0x04, 0x00, 0x02])) == (60, [1000.0, 500.0])
+assert strap.parse(bytes([0x19, 0x2C, 0x01, 9, 9, 0x00, 0x04])) == (300, [1000.0])
+assert strap.parse(bytes([0x00, 72])) == (72, [])
 
 print("ok")
