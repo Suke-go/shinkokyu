@@ -5,7 +5,7 @@ const $ = (id) => document.getElementById(id);
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const show = (id) => {
-  for (const s of ["s-login", "s-ready", "s-task", "s-done"]) $(s).hidden = s !== id;
+  for (const s of ["s-login", "s-ready", "s-base", "s-task", "s-done"]) $(s).hidden = s !== id;
 };
 
 let exp = null, sessionId = null, pid = "", active = false;
@@ -51,12 +51,30 @@ const saveLocalMeta = (patch) => {
   saveLocal("json", JSON.stringify(localMeta), false);
 };
 const pageNow = () => performance.timeOrigin + performance.now();
+// Resting breathing measured before the task (minutes set on the app's first screen; 0 = none).
+const WHY = {
+  empty: "レーダーに何も映っていません。実験者に知らせてください",
+  static: "呼吸の動きが見えていません。実験者に知らせてください",
+  moving: "体が動いています。楽な姿勢で、じっとしていてください",
+  few: "そのまま、普通に呼吸していてください",
+  irregular: "そのまま、普通に呼吸していてください",
+  steady: "測定できています",
+};
+let recording = false; // the radar's estimates are being logged: from the start of the baseline to the end of the task
+const base = { rows: 0, steady: 0, breaths: [], hearts: [] }; // collected while the baseline runs
+const median = (v) => { const a = [...v].sort((x, y) => x - y); return a.length ? (a[(a.length - 1) >> 1] + a[a.length >> 1]) / 2 : null; };
 if (tauri) {
   const heart = $("st-radar");
   heart.hidden = false;
   let lastBreath = 0;
+  tauri.event.listen("live", ({ payload: r }) => { $("base-why").textContent = WHY[r.quality_why] || ""; });
   tauri.event.listen("estimate", ({ payload: r }) => {
-    if (!active) return;
+    if (!recording) return;
+    if (!active) { // baseline
+      base.rows++;
+      if (r.quality === 3) base.steady++;
+      if (r.hr_bpm != null && r.hr_q >= 0.35) base.hearts.push(r.hr_bpm);
+    }
     log("vital", null, JSON.stringify({
       quality: r.quality, present: r.present, snr: r.snr_db, range: r.br_range_m,
       br: r.br_bpm, period: r.br_period_s, depth: r.br_depth_mm, regular: r.br_q, moving: r.br_moving,
@@ -66,6 +84,7 @@ if (tauri) {
     for (const b of r.breaths) { // each breath once, stamped with the moment it ended
       if (b.t <= lastBreath + 1000) continue;
       lastBreath = b.t;
+      if (!active) base.breaths.push(b);
       log("breath", null, JSON.stringify({ period: b.period_s, depth: b.depth_mm }));
       buf[buf.length - 1].t = b.t;
     }
@@ -197,7 +216,7 @@ async function postRetry(sync, tries = 20) {
 
 window.addEventListener("beforeunload", (e) => {
   const pending = sessionId && (pendingCount(sessionId) || buf.length);
-  if (active || pending) { e.preventDefault(); e.returnValue = ""; }
+  if (active || recording || pending) { e.preventDefault(); e.returnValue = ""; }
 });
 
 /* ---------- screens ---------- */
@@ -274,6 +293,28 @@ $("start-btn").addEventListener("click", async () => {
     $("ready-err").textContent = "時刻同期に失敗しました。続行します";
     $("st-dot").className = "dot bad";
   }
+  recording = true;
+  radar("start", { pageNow: pageNow() });
+  let seconds = 0;
+  try { seconds = tauri ? Number(localStorage.getItem("baselineMinutes") ?? 3) * 60 : 0; } catch { /* storage unavailable */ }
+  if (seconds > 0) { // the baseline lasts exactly this long; how steady the breathing was is recorded, not waited for
+    show("s-base");
+    log("baseline_start", null, JSON.stringify({ seconds }));
+    for (const t0 = pageNow(); ;) {
+      const done = (pageNow() - t0) / 1000;
+      if (done >= seconds) break;
+      $("base-bar").value = done / seconds;
+      const left = Math.ceil(seconds - done);
+      $("base-left").textContent = `あと ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
+      await sleep(250);
+    }
+    const periods = base.breaths.map((b) => b.period_s).sort((a, b) => a - b);
+    log("baseline_end", null, JSON.stringify({
+      seconds, steady_share: base.rows ? base.steady / base.rows : null, breaths: periods.length,
+      period: median(periods), period_iqr: periods.length > 1 ? periods[Math.floor((periods.length - 1) * 0.75)] - periods[Math.floor((periods.length - 1) * 0.25)] : null,
+      depth: median(base.breaths.map((b) => b.depth_mm)), hr: median(base.hearts),
+    }));
+  }
   $("doc-title").textContent = exp.title;
   $("doc-pid").textContent = "参加者 " + pid;
   $("src").textContent = exp.text;
@@ -283,7 +324,6 @@ $("start-btn").addEventListener("click", async () => {
   updateCount();
   snapshot("session_start");
   saveLocalMeta({ startedAt: pageNow() });
-  radar("start", { pageNow: pageNow() });
   ta.focus();
 });
 
@@ -306,7 +346,7 @@ $("end-btn").addEventListener("click", async () => {
   const finalText = ta.value;
   snapshot();
   snapshot("session_end");
-  active = false;
+  active = recording = false;
   radar("stop");
   line.textContent = "データを送信しています…";
   flush();

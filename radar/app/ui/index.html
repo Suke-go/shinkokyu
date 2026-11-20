@@ -8,14 +8,15 @@
 </head>
 <body data-state="idle" data-quality="0">
   <header>
-    <div class="base" aria-label="基準の計測の長さ（分。0 は止めるまで続ける）">
-      <button id="less" aria-label="1分短く">−</button>
+    <div class="base" title="課題の前に測る、安静時の呼吸の長さ（分）。0 で省く">
+      <button id="less" aria-label="安静時の計測を1分短く">−</button>
       <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
-      <output id="mins">3</output>
-      <button id="more" aria-label="1分長く">+</button>
+      <output id="mins" aria-label="課題の前に測る安静時の呼吸の長さ（分）">3</output>
+      <button id="more" aria-label="安静時の計測を1分長く">+</button>
     </div>
-    <div class="bars" id="bars" role="img" aria-label="信号の質（1本: 何かが映っている、2本: 呼吸している人が映っている、3本: 呼吸が安定して区切れている）"><i></i><i></i><i></i></div>
+    <div class="bars" id="bars" role="img" aria-label="信号の質"><i></i><i></i><i></i></div>
   </header>
+  <p id="why" role="status"></p>
   <div class="big" id="br" aria-label="呼吸数（毎分）">
     <svg viewBox="0 0 48 24" aria-hidden="true"><path d="M2 12c5-12 9-12 14 0s9 12 14 0 9-12 14 0"/></svg>
     <output>–</output>

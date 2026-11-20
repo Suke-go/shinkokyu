@@ -89,8 +89,8 @@ export function makeOffsetFn(syncs) // syncs=meta.syncs → (tLocal)=>tUtc。sta
 ```
 - `t`: **ローカル時刻** = `performance.timeOrigin + e.timeStamp`（小数ms）。UTC 変換は解析側で `t + offset`（§3）。Date.now() はイベント毎に使わない。
 - `seq`: セッション内の通し番号（0 始まり）。
-- `type`: `keydown` `keyup` `input` `compositionstart` `compositionupdate` `compositionend` `paste` `focus` `blur` `snapshot` `session_start` `session_end` `vital` `breath`
-- `vital` / `breath`: デスクトップアプリ（§5.5）内でのみ発生。`vital` はレーダーの 2 秒毎の推定で、`data` は JSON 文字列 `{"quality","present","snr","range","br","period","depth","regular","moving","hr","q"}`（`quality` 0〜3: 0 何も映っていない / 1 何かが映っている / 2 呼吸している人 / 3 呼吸が安定して区切れている。解析には 3 を使う）。`breath` は 1 呼吸が終わるたびに 1 件で、`t` はその呼吸の終わった時刻、`data` は `{"period","depth"}`（秒, mm）。どちらも `t` はこのページのローカル時刻。metrics.js は無視する。
+- `type`: `keydown` `keyup` `input` `compositionstart` `compositionupdate` `compositionend` `paste` `focus` `blur` `snapshot` `session_start` `session_end` `vital` `breath` `baseline_start` `baseline_end`
+- `vital` / `breath`: デスクトップアプリ（§5.5）内でのみ発生。`vital` はレーダーの 2 秒毎の推定で、`data` は JSON 文字列 `{"quality","present","snr","range","br","period","depth","regular","moving","hr","q"}`（`quality` 0〜3: 0 何も映っていない / 1 何かが映っている / 2 呼吸している人 / 3 呼吸が安定して区切れている。解析には 3 を使う）。`breath` は 1 呼吸が終わるたびに 1 件で、`t` はその呼吸の終わった時刻、`data` は `{"period","depth"}`（秒, mm）。`baseline_start` / `baseline_end` は、課題の前に測る安静時の呼吸（長さは `localStorage.baselineMinutes`、既定 3 分、0 で省く）の始まりと終わりで、`session_start` より前に入る。`baseline_end` の `data` は `{"seconds","steady_share","breaths","period","period_iqr","depth","hr"}`。安静時の計測は決めた長さちょうどで終わり、`quality` が 3 だった割合（`steady_share`）は記録するだけで、長さには影響させない。どちらも `t` はこのページのローカル時刻。metrics.js は無視する。
 - `key`,`code`,`repeat`: keydown/keyup のみ。他は null。
 - `blocked`: keydown のみ。ショートカット抑止で preventDefault した場合 true（それ以外は欠落）。
 - `isComposing`: KeyboardEvent/InputEvent の値。他は false。
@@ -162,7 +162,7 @@ offsetFn(tLocal) → UTC ms（§3 の補正）。
 
 デスクトップアプリ（`radar/app`、Tauri: Rust + TS）と `radar/vitals.py` の 2 実装。チャープ設定は `radar/chirp.cfg` を共有し、推定方法・ファイル形式は同一。使い方は `radar/README.md`。
 
-- アプリ: Pages 版のサイト（§5.3）を同梱し、タイピング課題を別ウィンドウで開く。課題の `session_start` で `start {session, pageNow}` を呼び、アプリは自分の時計とページの時計（`pageNow`）の差を取って（`radar_*.json` の `clockOffsetMs`）、以後の時刻をページのローカル時刻で付ける。推定は `vital` / `breath` イベント（§4）としてページのイベント列に入るので、**時刻同期と保存はタイピングのセッションの 1 系統だけ**。アプリ内ではセッションをこの PC にも保存する: 「ドキュメント/shinkokyu-radar」に `typing_<sessionId>.json`（§2 と同形、書き換え）と `typing_<sessionId>.events.jsonl`（追記）、レーダーの生データ `radar_<sessionId>.*`。Supabase に届かないときは static モードに落として、送信なしで進む。最初の画面（向き合わせ）は 1 秒毎に更新し、信号の質（`quality`）を 3 本のバーで出す。そこで測ったときは `radar_<UTC stamp>.*` に、この PC の時計（同期なし）で保存する。 基準の計測（`start {baselineS}`）は、最初の推定から指定の秒数で自動で止まり、`radar_<UTC stamp>.baseline.json`（呼吸の長さの中央値・ばらつき・深さ、心拍数、`quality` が 3 だった時間の割合 `steady_share`）を書く。長さはしきい値に左右されない。
+- アプリ: Pages 版のサイト（§5.3）を同梱し、タイピング課題を別ウィンドウで開く。課題の `session_start` で `start {session, pageNow}` を呼び、アプリは自分の時計とページの時計（`pageNow`）の差を取って（`radar_*.json` の `clockOffsetMs`）、以後の時刻をページのローカル時刻で付ける。推定は `vital` / `breath` イベント（§4）としてページのイベント列に入るので、**時刻同期と保存はタイピングのセッションの 1 系統だけ**。アプリ内ではセッションをこの PC にも保存する: 「ドキュメント/shinkokyu-radar」に `typing_<sessionId>.json`（§2 と同形、書き換え）と `typing_<sessionId>.events.jsonl`（追記）、レーダーの生データ `radar_<sessionId>.*`。Supabase に届かないときは static モードに落として、送信なしで進む。最初の画面（向き合わせ）は 1 秒毎に更新し、信号の質（`quality`）を 3 本のバーと理由の 1 行（`quality_why`）で出す。レーダーの記録は課題のスタート（安静時の計測の始まり）から終了まで途切れない。そこで測ったときは `radar_<UTC stamp>.*` に、この PC の時計（同期なし）で保存する。
 - `vitals.py`: 単独記録。下記の「時刻」のとおり自分で同期する。
 
 - 機材: PTM RFR79ITR34-30U（TI IWR1843、mmWave SDK 3.5 標準デモ FW、FT4232H: チャネル A = CLI 115200bps / B = データ 921600bps）。77.0–80.82GHz、1TX/4RX、64 距離ビン（約 4.8cm）、40 フレーム/秒（位相が折り返さない上限 38mm/s）。1 フレーム = 0.75ms 間隔の 16 チャープ（12ms）で、その和（ゼロドップラー）を使うため約 8cm/s より速い動き（打鍵中の手・腕）は打ち消される。
