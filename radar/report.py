@@ -39,10 +39,12 @@ def load(bin_path):
         r["s"] = (r["t"] - rec["t"][0]) / 1000
     # chest strap logged alongside (strap.py): its mean rate over the same 20 s as each estimate
     rr_path = bin_path.with_suffix("").with_suffix(".rr.jsonl")
-    beats = [(n["t"], x) for n in map(json.loads, rr_path.read_text().splitlines()) for x in n["rr"]] if rr_path.exists() else []
+    notes = [json.loads(l) for l in rr_path.read_text().splitlines()] if rr_path.exists() else []
     for r in rows:
-        rr = [x for t, x in beats if r["t"] - r["window"] * 1000 < t <= r["t"]]
-        r["strap_bpm"] = 60000 / np.mean(rr) if len(rr) >= 10 else None
+        inside = [n for n in notes if r["t"] - r["window"] * 1000 < n["t"] <= r["t"]]
+        rr = [x for n in inside for x in n["rr"]]
+        # a wristband that broadcasts its rate sends no intervals: use the rate it reports
+        r["strap_bpm"] = 60000 / np.mean(rr) if len(rr) >= 10 else float(np.mean([n["hr"] for n in inside])) if len(inside) >= 5 else None
     return meta, rec, H, rows
 
 
