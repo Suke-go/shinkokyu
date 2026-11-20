@@ -1,5 +1,6 @@
 type Status = { state: string; text?: string; progress?: number };
-type Estimate = { hr_bpm: number | null; hr_q: number | null; br_bpm: number | null; span_mm: number | null; disp: number[] };
+type Estimate = { present: boolean; hr_bpm: number | null; hr_q: number | null; br_bpm: number | null; disp: number[] };
+type Seen = { db: number[] };
 type Stopped = { error: string | null };
 type Win = { once(event: string, fn: () => void): void; setFocus(): Promise<void> };
 
@@ -20,7 +21,9 @@ const el = (id: string) => document.getElementById(id)!;
 const hr = el("hr"), br = el("br"), note = el("note"), toggle = el("toggle");
 const canvas = el("trace") as HTMLCanvasElement;
 const setState = (s: string) => { document.body.dataset.state = s; };
+const strip = el("seen") as HTMLCanvasElement;
 let trace: number[] = [];
+let seen: number[] = [];
 let mine = false; // this window started the measurement (a typing session starts its own)
 
 function show(box: HTMLElement, value: number | null, trusted: boolean) {
@@ -46,6 +49,16 @@ function draw() {
 }
 new ResizeObserver(draw).observe(canvas);
 
+function drawSeen() {
+  const w = (strip.width = strip.clientWidth), h = (strip.height = strip.clientHeight);
+  const g = strip.getContext("2d")!;
+  seen.forEach((db, i) => {
+    g.fillStyle = `rgba(34, 34, 34, ${Math.min(Math.max((db - 10) / 30, 0), 1)})`; // 10 dB over the floor = blank, 40 dB = black
+    g.fillRect((i * w) / seen.length, 0, Math.ceil(w / seen.length), h);
+  });
+}
+new ResizeObserver(drawSeen).observe(strip);
+
 function reset() {
   mine = false;
   setState("idle");
@@ -54,7 +67,9 @@ function reset() {
   show(hr, null, true);
   show(br, null, true);
   trace = [];
+  seen = [];
   draw();
+  drawSeen();
 }
 
 toggle.onclick = async () => {
@@ -90,12 +105,17 @@ listen<Status>("status", ({ payload: s }) => {
 
 listen<Estimate>("estimate", ({ payload: e }) => {
   if (document.body.dataset.state !== "stopping") setState("streaming");
-  const present = (e.span_mm ?? 0) >= 0.2; // someone is in front of the radar
-  show(hr, e.hr_bpm, present && (e.hr_q ?? 0) >= 0.35);
-  show(br, e.br_bpm, present);
+  // nothing in the beam: no numbers at all, rather than numbers made from noise
+  show(hr, e.present ? e.hr_bpm : null, (e.hr_q ?? 0) >= 0.35);
+  show(br, e.present ? e.br_bpm : null, true);
   if (e.hr_bpm) (hr.querySelector("svg") as SVGElement).style.animationDuration = `${60 / e.hr_bpm}s`;
-  trace = e.disp;
+  trace = e.present ? e.disp : [];
   draw();
+});
+
+listen<Seen>("seen", ({ payload }) => {
+  seen = payload.db;
+  drawSeen();
 });
 
 listen<Stopped>("stopped", ({ payload }) => {

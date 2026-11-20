@@ -36,7 +36,7 @@ try {
   await key('Backspace', 'Backspace'); await wait(2600); // pause ≥2 s
   await send('Input.imeSetComposition', { text: 'は', selectionStart: 1, selectionEnd: 1 }); await send('Input.insertText', { text: 'は' }); await wait(300);
   await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Enter',code:'Enter',text:String.fromCharCode(13),windowsVirtualKeyCode:13}); await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13}); await wait(200); await key('x','KeyX','x'); await wait(200); await shot('e2e-task');
-  await ev(`__on.estimate({payload:{t:123456.5,hr_bpm:72.4,hr_q:0.6,br_bpm:15,span_mm:6,range_m:0.6}})`);
+  await ev(`__on.estimate({payload:{t:123456.5,hr_bpm:72.4,hr_q:0.6,br_bpm:15,span_mm:6,range_m:0.6,snr_db:33,present:true}})`);
   const ta = await ev(`document.getElementById('ed').value`);
   await ev(`document.getElementById('finish-btn').click()`); await wait(200); await shot('e2e-confirm');
   await ev(`document.getElementById('end-btn').click()`);

@@ -33,12 +33,19 @@ t = np.arange(int(30 * v.FRAME_HZ)) / v.FRAME_HZ
 d = 3e-3 * np.sin(2 * np.pi * 0.3 * t) + 0.1e-3 * np.sin(2 * np.pi * 1.15 * t)
 b = round(0.6 / v.RANGE_RES)
 shape = (len(t), v.N_SAMPLES, v.N_ANT)
-H = 300 * (rng.standard_normal(shape[1:]) + 1j * rng.standard_normal(shape[1:])) + 5 * (rng.standard_normal(shape) + 1j * rng.standard_normal(shape))
+H = 30 * (rng.standard_normal(shape[1:]) + 1j * rng.standard_normal(shape[1:])) + 5 * (rng.standard_normal(shape) + 1j * rng.standard_normal(shape))
 H[:, b, :] += 2000 * np.exp(1j * 4 * np.pi * d / v.WAVELENGTH)[:, None]
 r = v.analyze(H, 0.3, 1.5)
 assert abs(r["range_m"] - 0.6) < v.RANGE_RES, r["range_m"]
 assert abs(r["br_bpm"] - 18) < 1.5, r["br_bpm"]
 assert abs(r["hr_bpm"] - 69) < 3, r["hr_bpm"]
 assert r["hr_q"] > 0.5, r["hr_q"]
+assert r["present"] and r["snr_db"] > v.SNR_MIN_DB, r["snr_db"]
+H[:, b, :] -= 2000 * np.exp(1j * 4 * np.pi * d / v.WAVELENGTH)[:, None]  # nobody there
+r = v.analyze(H, 0.3, 1.5)
+assert not r["present"] and r["snr_db"] < 15, r["snr_db"]
+H[:, b, :] += 2000  # a chair: strong, but it does not breathe
+r = v.analyze(H, 0.3, 1.5)
+assert not r["present"] and r["snr_db"] > v.SNR_MIN_DB and r["span_mm"] < 0.2, (r["snr_db"], r["span_mm"])
 
 print("ok")

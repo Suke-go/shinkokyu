@@ -43,8 +43,9 @@ pub struct Options {
     pub stem: Option<PathBuf>,
 }
 
-/// Measure until `stop` is set. Events for the UI: "status" {state, text?, progress?} and
-/// "estimate" {t, window, ...Estimate, disp}.
+/// Measure until `stop` is set. Events for the UI: "status" {state, text?, progress?},
+/// "seen" {db} twice a second (reflection per range bin from RMIN_M to RMAX_M, in dB over
+/// the noise floor: what the radar is pointed at right now) and "estimate" {t, window, ...Estimate, disp}.
 pub fn measure(opts: &Options, stop: &AtomicBool, emit: &dyn Fn(&str, Value)) -> Result<(), String> {
     let es = |e: std::io::Error| e.to_string();
     let chirp = Chirp::load();
@@ -67,6 +68,8 @@ pub fn measure(opts: &Options, stop: &AtomicBool, emit: &dyn Fn(&str, Value)) ->
     let win = (WINDOW_S * chirp.frame_hz) as usize;
     let mut window: VecDeque<(u32, Vec<u8>)> = VecDeque::with_capacity(win);
     let (mut anchor, mut last_fnum, mut configured, mut last_est) = (f64::INFINITY, None::<u32>, false, Instant::now());
+    let (first_bin, end_bin) = ((RMIN_M / chirp.range_res).ceil() as usize, (RMAX_M / chirp.range_res) as usize + 1);
+    let (mut seen, mut seen_frames, mut last_seen) = (vec![0.0; chirp.n_bins], 0, Instant::now());
 
     let result = loop {
         // one connection; a knock on the USB cable ends it with Fail::Retry
@@ -102,6 +105,10 @@ pub fn measure(opts: &Options, stop: &AtomicBool, emit: &dyn Fn(&str, Value)) ->
                             window.clear();
                         }
                         last_fnum = Some(fnum);
+                        for (b, bin) in iq.chunks_exact(N_ANT * 4).enumerate() {
+                            seen[b] += bin.chunks_exact(4).map(|c| (i16::from_le_bytes([c[2], c[3]]) as f64).hypot(i16::from_le_bytes([c[0], c[1]]) as f64)).sum::<f64>();
+                        }
+                        seen_frames += 1;
                         // Earliest arrival relative to the radar's own frame clock = least USB delay.
                         // shortcut: still ~15-20 ms late (frame processing + UART) and ignores crystal
                         // drift (~50 ppm), upgrade if beat-level timing is needed.
@@ -110,6 +117,13 @@ pub fn measure(opts: &Options, stop: &AtomicBool, emit: &dyn Fn(&str, Value)) ->
                             window.pop_front();
                         }
                         window.push_back((fnum, iq));
+                    }
+                    if last_seen.elapsed() >= Duration::from_millis(500) && seen_frames > 0 {
+                        let floor = vitals::noise_floor(&seen, first_bin);
+                        let db: Vec<f64> = seen[first_bin..end_bin].iter().map(|a| 20.0 * (a / floor).max(1.0).log10()).collect();
+                        emit("seen", json!({ "db": db }));
+                        seen.fill(0.0);
+                        (seen_frames, last_seen) = (0, Instant::now());
                     }
                     if last_est.elapsed() < Duration::from_secs(2) {
                         continue;

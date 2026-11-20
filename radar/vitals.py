@@ -27,6 +27,10 @@ MAGIC = bytes([2, 1, 4, 3, 6, 5, 8, 7])
 HEADER = struct.Struct("<8I")  # fields after the magic word
 TLV_AZIMUTH_STATIC_HEATMAP = 4
 N_ANT = 4
+# A person in the beam: a reflection well above the noise floor (a body gives 28-39 dB, an empty beam
+# 7-13 dB) that also moves with breathing (millimetres; a chair or a wall stays within 0.2 mm).
+SNR_MIN_DB = 26
+SPAN_MIN_MM = 0.5
 
 CONFIG = [l.strip() for l in (HERE / "chirp.cfg").read_text().splitlines() if l.strip() and not l.startswith("%")]
 _profile = next(l for l in CONFIG if l.startswith("profileCfg")).split()
@@ -217,6 +221,8 @@ def analyze(H, rmin, rmax):
     motion = (np.abs(ac) ** 2).mean(axis=(0, 2))
     motion[(rng < rmin) | (rng > rmax)] = 0
     bins = np.flatnonzero(motion >= 0.25 * motion.max())
+    amp = np.abs(H).mean(axis=(0, 2))
+    snr_db = 20 * np.log10(amp[bins].max() / np.percentile(amp[rng >= rmin], 20))
     # Frame-to-frame phase step, power-weighted over the body's range bins and all antennas,
     # so a fade in one bin or antenna carries little weight.
     dphi = np.angle((H[1:, bins] * H[:-1, bins].conj()).sum(axis=(1, 2)))
@@ -228,6 +234,8 @@ def analyze(H, rmin, rmax):
     # Heart rate from velocity: breathing is far larger than the heartbeat in displacement.
     hr_f, hr_q, hr_sig, hr_spec = band_peak(dphi * mm * FRAME_HZ, 0.8, 2.5)
     return {
+        "present": bool(snr_db >= SNR_MIN_DB and np.ptp(br_sig) >= SPAN_MIN_MM),
+        "snr_db": float(snr_db),
         "range_m": float(rng[bins] @ motion[bins] / motion[bins].sum()),
         "span_mm": float(np.ptp(br_sig)),
         "br_bpm": float(br_f * 60),
@@ -243,15 +251,16 @@ def analyze(H, rmin, rmax):
 
 
 def describe(r):
+    if not r["present"]:
+        what = "nothing in the beam" if r["snr_db"] < SNR_MIN_DB else "something in the beam, but it does not breathe"
+        return f"no person: {what} (reflection {r['snr_db']:.0f} dB over the floor, motion {r['span_mm']:.2f} mm). Re-aim the radar"
     notes = []
-    if r["span_mm"] < 0.2:
-        notes.append("almost no chest motion: nobody in range?")
     if r["hr_q"] < 0.35:
         notes.append("HR peak weak")
     if r["hr_harmonic"]:
         notes.append("HR peak sits on a breathing harmonic")
     return (
-        f"range {r['range_m']:.2f} m | breathing {r['br_bpm']:4.1f}/min "
+        f"range {r['range_m']:.2f} m ({r['snr_db']:.0f} dB) | breathing {r['br_bpm']:4.1f}/min "
         f"(chest {r['span_mm']:.2f} mm) | heart {r['hr_bpm']:5.1f} bpm (q={r['hr_q']:.2f})"
         + (f"  [{'; '.join(notes)}]" if notes else "")
     )

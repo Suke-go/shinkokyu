@@ -4,8 +4,26 @@ use rustfft::{num_complex::Complex64, FftPlanner};
 use serde::Serialize;
 use std::f64::consts::PI;
 
+/// A person in the beam: a reflection well above the noise floor (a body gives 28-39 dB, an empty
+/// beam 7-13 dB) that also moves with breathing (millimetres; a chair or a wall stays within 0.2 mm).
+pub const SNR_MIN_DB: f64 = 26.0;
+pub const SPAN_MIN_MM: f64 = 0.5;
+
+/// 20th percentile of the per-bin reflection amplitude from `first` on: the level of bins with nothing in them.
+pub fn noise_floor(amp: &[f64], first: usize) -> f64 {
+    let mut a = amp[first..].to_vec();
+    a.sort_by(f64::total_cmp);
+    let pos = 0.2 * (a.len() - 1) as f64;
+    let (i, frac) = (pos as usize, pos.fract());
+    a[i] + frac * (a[(i + 1).min(a.len() - 1)] - a[i])
+}
+
 #[derive(Serialize)]
 pub struct Estimate {
+    /// a person is in the beam; without one the rates below are noise
+    pub present: bool,
+    /// reflection of the measured bins over the noise floor
+    pub snr_db: f64,
     pub range_m: f64,
     /// peak-to-peak chest displacement in the breathing band
     pub span_mm: f64,
@@ -84,12 +102,14 @@ pub fn analyze(fnums: &[u32], frames: &[&[u8]], chirp: &Chirp, rmin: f64, rmax: 
     for row in h.chunks_exact(w) {
         mean.iter_mut().zip(row).for_each(|(m, v)| *m += v);
     }
-    let mut motion = vec![0.0; nb];
+    let (mut motion, mut amp) = (vec![0.0; nb], vec![0.0; nb]);
     for row in h.chunks_exact(w) {
         for (i, v) in row.iter().enumerate() {
             motion[i / N_ANT] += (v - mean[i] / t as f64).norm_sqr();
+            amp[i / N_ANT] += v.norm();
         }
     }
+    let floor = noise_floor(&amp, (rmin / chirp.range_res).ceil() as usize);
     let range = |b: usize| b as f64 * chirp.range_res;
     for (b, m) in motion.iter_mut().enumerate() {
         if range(b) < rmin || range(b) > rmax {
@@ -117,7 +137,10 @@ pub fn analyze(fnums: &[u32], frames: &[&[u8]], chirp: &Chirp, rmin: f64, rmax: 
     let vel: Vec<f64> = dphi.iter().map(|d| d * mm * chirp.frame_hz).collect();
     let (hr_f, hr_q, _) = band_peak(&vel, chirp.frame_hz, 0.8, 2.5);
     let (lo, hi) = br_sig.iter().fold((f64::MAX, f64::MIN), |(a, b), v| (a.min(*v), b.max(*v)));
+    let snr_db = 20.0 * (bins.iter().map(|&b| amp[b]).fold(0.0, f64::max) / floor).log10();
     Estimate {
+        present: snr_db >= SNR_MIN_DB && hi - lo >= SPAN_MIN_MM,
+        snr_db,
         range_m: bins.iter().map(|&b| range(b) * motion[b]).sum::<f64>() / bins.iter().map(|&b| motion[b]).sum::<f64>(),
         span_mm: hi - lo,
         br_bpm: br_f * 60.0,
@@ -134,9 +157,7 @@ mod tests {
     use super::*;
 
     /// 18 breaths/min (3 mm) + 69 bpm (0.1 mm) at 0.6 m over static clutter, with dropped frames.
-    #[test]
-    fn finds_breathing_and_heartbeat() {
-        let chirp = Chirp::load();
+    fn scene(chirp: &Chirp, body: f64, breathing_m: f64) -> (Vec<u32>, Vec<Vec<u8>>) {
         let target = (0.6 / chirp.range_res).round() as usize;
         let (mut fnums, mut frames) = (Vec::new(), Vec::new());
         for ti in 0..(30.0 * chirp.frame_hz) as u32 {
@@ -144,15 +165,16 @@ mod tests {
                 continue;
             }
             let s = ti as f64 / chirp.frame_hz;
-            let d = 3e-3 * (2.0 * PI * 0.3 * s).sin() + 0.1e-3 * (2.0 * PI * 1.15 * s).sin();
+            let d = breathing_m * (2.0 * PI * 0.3 * s).sin() + breathing_m / 30.0 * (2.0 * PI * 1.15 * s).sin();
             let phase = 4.0 * PI * d / chirp.wavelength;
             let mut iq = Vec::new();
             for b in 0..chirp.n_bins {
                 for a in 0..N_ANT {
-                    let (mut re, mut im) = ((b * 37 % 300) as f64 - 150.0, (a * 91 % 300) as f64 - 150.0);
+                    // clutter that flickers a little, as real empty bins do
+                    let (mut re, mut im) = ((b * 37 % 30) as f64 - 15.0 + (ti * 7 % 5) as f64, (a * 91 % 30) as f64 - 15.0 + (ti * 3 % 5) as f64);
                     if b == target {
-                        re += 2000.0 * phase.cos();
-                        im += 2000.0 * phase.sin();
+                        re += body * phase.cos();
+                        im += body * phase.sin();
                     }
                     iq.extend((im.round() as i16).to_le_bytes());
                     iq.extend((re.round() as i16).to_le_bytes());
@@ -161,12 +183,31 @@ mod tests {
             fnums.push(ti);
             frames.push(iq);
         }
+        (fnums, frames)
+    }
+
+    #[test]
+    fn finds_breathing_and_heartbeat() {
+        let chirp = Chirp::load();
+        let (fnums, frames) = scene(&chirp, 2000.0, 3e-3);
         let refs: Vec<&[u8]> = frames.iter().map(Vec::as_slice).collect();
         let e = analyze(&fnums, &refs, &chirp, 0.3, 1.5);
+        assert!(e.present && e.snr_db > SNR_MIN_DB, "snr {}", e.snr_db);
         assert!((e.range_m - 0.6).abs() < chirp.range_res, "range {}", e.range_m);
         assert!((e.br_bpm - 18.0).abs() < 1.5, "br {}", e.br_bpm);
         assert!((e.hr_bpm - 69.0).abs() < 3.0, "hr {}", e.hr_bpm);
         assert!(e.hr_q > 0.5, "q {}", e.hr_q);
         assert!((e.span_mm - 6.0).abs() < 1.0, "span {}", e.span_mm);
+    }
+
+    #[test]
+    fn an_empty_beam_and_a_chair_are_not_a_person() {
+        let chirp = Chirp::load();
+        for (body, snr_ok) in [(0.0, false), (2000.0, true)] {
+            let (fnums, frames) = scene(&chirp, body, 0.0);
+            let refs: Vec<&[u8]> = frames.iter().map(Vec::as_slice).collect();
+            let e = analyze(&fnums, &refs, &chirp, 0.3, 1.5);
+            assert!(!e.present && (e.snr_db >= SNR_MIN_DB) == snr_ok, "body {body}: snr {} span {}", e.snr_db, e.span_mm);
+        }
     }
 }
