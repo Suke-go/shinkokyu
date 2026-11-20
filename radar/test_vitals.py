@@ -71,6 +71,17 @@ assert abs(r["hr_bpm"] - 69) < 3 and r["hr_q"] > 0.35, (r["hr_bpm"], r["hr_q"]) 
 r = seen[110.0]
 assert abs(r["br_period_s"] - 8.0) < 0.6 and abs(r["br_depth_mm"] - 6.0) < 1.2, (r["br_period_s"], r["br_depth_mm"])
 
+# --- breathing first: a heart-band peak on a breathing harmonic is not a heart rate
+fs = v.FRAME_HZ
+ts = np.arange(int(20 * fs)) / fs
+harmonic = 2 * np.pi * 1.0 * 0.3 * np.cos(2 * np.pi * 1.0 * ts)  # velocity of a 0.3 mm wobble at 1.0 Hz = 4th harmonic of a 4 s breath
+assert abs(br.heart_rate(harmonic, fs)[0] - 60) < 2
+assert br.heart_rate(harmonic, fs, breath_s=4.0)[0] is None
+assert abs(br.heart_rate(harmonic, fs, prev=61, breath_s=4.0)[0] - 60) < 2  # it was the heart rate a moment ago: it stays
+beat = harmonic + 2 * np.pi * 1.2 * 0.1 * np.cos(2 * np.pi * 1.2 * ts)  # plus a weaker real heartbeat at 72
+assert br.heart_rate(beat, fs, breath_s=4.0)[0] is None  # nothing says which one is the heart
+assert abs(br.heart_rate(beat, fs, prev=74, breath_s=4.0)[0] - 72) < 2  # the last value does
+
 # --- chest strap: Heart Rate Measurement packets (8-bit and 16-bit rate, with and without energy field)
 import strap
 
