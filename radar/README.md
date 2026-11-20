@@ -137,6 +137,41 @@ python radar/report.py <.bin またはフォルダ>   # アプリの記録（ド
 
 課題中の記録では、打鍵していた時間の割合と、打鍵中とそれ以外での体動の割合・数えられた呼吸（毎分）も出る。
 
+## 解析用の表にする
+
+```
+python radar/export.py              # このPCの「ドキュメント/shinkokyu-radar」
+python radar/export.py <フォルダ>     # ほかの PC から持ってきたフォルダ
+```
+
+フォルダの中の全セッションを読み、`export/` に 2 枚の表を書く（UTF-8、Excel で開ける）。呼吸は、記録したときの値ではなく、レーダーの生データからいまの方法で求め直す。推定方法を直したあとも、全セッションが同じ扱いになる。
+
+`sessions.csv`: セッションごとに 1 行。
+
+| 列 | 意味 |
+|---|---|
+| `session_id` / `exp_id` / `participant_id` | セッション、課題、参加者 |
+| `started_utc` / `synced` | 入力開始の時刻（UTC）。サーバーの時計と同期できたときだけ入る |
+| `rest_s` / `rest_skipped` | 安静時の計測の長さ（秒）、右下の隅で飛ばしたか |
+| `rest_breaths` / `rest_period_s` / `rest_period_iqr_s` / `rest_depth_mm` | 安静時: 呼吸の回数、長さの中央値、ばらつき（25〜75% の幅）、深さ |
+| `rest_moved` | 安静時に体が動いていた時間の割合。高いものは基準に使わない |
+| `task_s` と `task_*` | 同じものの課題中の値 |
+| `keys` / `final_chars` / `source_chars` / `finished` | 打鍵数、入力した字数、課題文の字数、最後まで終えたか |
+| `radar_frames_dropped` | レーダーのフレームの欠落数 |
+
+`breaths.csv`: 呼吸 1 回ごとに 1 行。
+
+| 列 | 意味 |
+|---|---|
+| `phase` | `rest`（安静時）か `task`（課題中） |
+| `t_s` | その呼吸が終わった時刻。入力開始からの秒（安静時は負） |
+| `utc` | 同じ時刻の UTC（同期できたときだけ） |
+| `period_s` / `depth_mm` | 長さ、深さ |
+
+打鍵の速度や停止の指標は、ダッシュボードの書き出し（`sessions.csv` / `events.csv`）にある。`session_id` と時刻で突き合わせる。
+
+保管は「ドキュメント/shinkokyu-radar」をフォルダごと残す。生データ（`typing_*` と `radar_*`）が元で、`export/` と `.report.png` はいつでも作り直せる。
+
 ## 胸ストラップと比べる
 
 心拍数が合っているかは、胸ストラップ（拍ごとの間隔を出す Bluetooth 心拍計。Polar H9/H10、Garmin HRM-Dual、Wahoo TICKR など）を同時に記録して確かめる。

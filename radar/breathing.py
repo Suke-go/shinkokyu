@@ -149,6 +149,19 @@ def heart_rate(vel, fs, prev=None, breath_s=None):
     return float(fb[k] * 60), float(s[band][np.abs(fb - fb[k]) <= 0.1].sum() / s[band].sum()), float(fb[top] * 60)
 
 
+def follow(H, fs, mm_per_rad, rng, rmin, rmax):
+    """A whole recording, followed the way the live estimator follows it.
+    H: complex [time, bin, antenna]. -> (breathing wave mm, body-shifting mask, [(start, end, period s, depth mm)]),
+    one wave sample per frame step; start and end index into it."""
+    tracker = Breathing(fs, mm_per_rad, rng, rmin, rmax, keep_s=None)
+    hop, look = int(2 * fs), int(SELECT_S * fs)
+    wave, shifting = np.zeros(1), np.zeros(1, bool)
+    for end in range(min(int(10 * fs), len(H)), len(H) + 1, hop):
+        r = tracker.update(H[max(end - look, 0) : end], hop)
+        wave, shifting = r["wave"], r["shifting"]
+    return wave, shifting, [(a, e, (e - a) / fs, d) for a, e, d in cut_breaths(wave, fs, shifting)]
+
+
 class Breathing:
     """Follows the chest from update to update and keeps one continuous breathing wave."""
 

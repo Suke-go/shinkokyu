@@ -19,7 +19,7 @@ import matplotlib.font_manager
 import matplotlib.pyplot as plt
 import numpy as np
 
-from breathing import SELECT_S, Breathing, cut_breaths
+from breathing import follow
 
 N_ANT = 4
 Q_MIN, SNR_MIN_DB, SPAN_MIN_MM = 0.35, 18, 0.3  # README: when an estimate is usable
@@ -108,13 +108,8 @@ def summarize(meta, rec, H, rows):
     hr = np.array([r["hr_bpm"] for r in ok])
     gaps = np.diff(rec["t"])
     # the breathing wave over the whole session, followed the way the live estimator follows it
-    tracker = Breathing(fps, mm, rng, 0.3, RMAX_M, keep_s=None)
-    hop, look, filled = int(2 * fps), int(SELECT_S * fps), np.nan_to_num(H)
-    wave, shifting = np.zeros(1), np.zeros(1, bool)
-    for end in range(min(int(10 * fps), len(H)), len(H) + 1, hop):
-        r = tracker.update(filled[max(end - look, 0) : end], hop)
-        wave, shifting = r["wave"], r["shifting"]
-    breaths = [(e / fps, (e - a) / fps, d) for a, e, d in cut_breaths(wave, fps, shifting)]  # (end s, period s, depth mm)
+    wave, shifting, cut = follow(np.nan_to_num(H), fps, mm, rng, 0.3, RMAX_M)
+    breaths = [(e / fps, period, d) for _, e, period, d in cut]  # (end s, period s, depth mm)
     periods = np.array([b[1] for b in breaths])
     # typing: a frame counts as "typing" if a key was pressed in the 2 s up to it
     keys = meta["keys_s"]
