@@ -6,7 +6,9 @@ type Live = {
   hr_q: number;
   wave: number[]; // breathing wave of the last 30 s, mm
   cuts: number[]; // indices into `wave` where a breath starts or ends
+  baseline?: { have_s: number; need_s: number }; // steady breathing collected so far
 };
+type Baseline = { br_bpm: number | null; hr_bpm: number | null };
 type Seen = { db: number[] };
 type Stopped = { error: string | null };
 type Win = { once(event: string, fn: () => void): void; setFocus(): Promise<void> };
@@ -14,7 +16,7 @@ type Win = { once(event: string, fn: () => void): void; setFocus(): Promise<void
 declare global {
   interface Window {
     __TAURI__: {
-      core: { invoke<T>(cmd: string): Promise<T> };
+      core: { invoke<T>(cmd: string, args?: object): Promise<T> };
       event: { listen<T>(name: string, fn: (e: { payload: T }) => void): Promise<unknown> };
       webviewWindow: { WebviewWindow: { new (label: string, options: object): Win; getByLabel(label: string): Promise<Win | null> } };
     };
@@ -33,6 +35,19 @@ const css = (name: string) => getComputedStyle(document.body).getPropertyValue(n
 let trace: number[] = [], cuts: number[] = [], seen: number[] = [];
 let mine = false; // this window started the measurement (a typing session starts its own)
 let estimating = false; // "live" has started: it decides the quality from here on
+
+// Baseline length in minutes of steady breathing; 0 = measure until stopped. Remembered between runs.
+const mins = el("mins");
+let minutes = 3;
+try { minutes = Number(localStorage.getItem("baselineMinutes") ?? 3); } catch { /* storage unavailable */ }
+function setMinutes(m: number) {
+  minutes = Math.min(Math.max(Math.round(m) || 0, 0), 10);
+  mins.textContent = minutes ? String(minutes) : "∞";
+  try { localStorage.setItem("baselineMinutes", String(minutes)); } catch { /* storage unavailable */ }
+}
+setMinutes(minutes);
+el("less").onclick = () => setMinutes(minutes - 1);
+el("more").onclick = () => setMinutes(minutes + 1);
 
 function show(box: HTMLElement, value: number | null, trusted: boolean) {
   box.querySelector("output")!.textContent = value == null ? "–" : String(Math.round(value));
@@ -76,6 +91,7 @@ new ResizeObserver(drawSeen).observe(strip);
 
 function reset() {
   mine = estimating = false;
+  delete document.body.dataset.done;
   setState("idle");
   setQuality(0);
   toggle.setAttribute("aria-label", "測定開始");
@@ -90,8 +106,9 @@ function reset() {
 toggle.onclick = async () => {
   try {
     if (document.body.dataset.state === "idle") {
+      reset(); // clears a finished baseline off the screen
       note.textContent = "";
-      await invoke("start");
+      await invoke("start", minutes ? { baselineS: minutes * 60 } : undefined);
       mine = true;
       toggle.setAttribute("aria-label", "測定停止");
       setState("connecting");
@@ -136,10 +153,21 @@ listen<Live>("live", ({ payload: e }) => {
   trace = e.quality >= 2 ? e.wave : [];
   cuts = e.quality >= 2 ? e.cuts : [];
   draw();
+  if (e.baseline) toggle.style.setProperty("--p", String(Math.min(e.baseline.have_s / e.baseline.need_s, 1))); // the ring is the baseline's progress
+});
+
+// A baseline finished: it stops by itself and its result stays on the screen.
+listen<Baseline>("baseline", ({ payload: b }) => {
+  document.body.dataset.done = "1";
+  show(br, b.br_bpm, true);
+  show(hr, b.hr_bpm, true);
 });
 
 listen<Stopped>("stopped", ({ payload }) => {
-  reset();
+  if (document.body.dataset.done) {
+    mine = estimating = false;
+    setState("idle");
+  } else reset();
   note.textContent = payload.error ?? "";
 });
 

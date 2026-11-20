@@ -42,6 +42,9 @@ pub struct Options {
     pub session_id: Option<String>,
     /// Write `<stem>.json`, `.bin`, `.hr.jsonl`. None = show estimates only.
     pub stem: Option<PathBuf>,
+    /// Take a baseline of resting breathing: stop by itself once this many seconds of steady breathing
+    /// (quality 3) have been collected, and write `<stem>.baseline.json`.
+    pub baseline_s: Option<f64>,
 }
 
 /// Measure until `stop` is set. Events for the UI: "status" {state, text?, progress?},
@@ -49,6 +52,7 @@ pub struct Options {
 /// floor: what the radar is pointed at right now), "live" every second for the screen (the row below plus
 /// the breathing wave of the last 30 s and where its breaths end) and "estimate" every 2 s for the record
 /// (the row written to .hr.jsonl: t, window, present, snr_db, range_m, span_mm, br_*, hr_*, breaths).
+/// With `baseline_s`, "live" carries baseline {have_s, need_s} and "baseline" {summary} is sent at the end.
 pub fn measure(opts: &Options, stop: &AtomicBool, emit: &dyn Fn(&str, Value)) -> Result<(), String> {
     let es = |e: std::io::Error| e.to_string();
     let chirp = Chirp::load();
@@ -75,6 +79,9 @@ pub fn measure(opts: &Options, stop: &AtomicBool, emit: &dyn Fn(&str, Value)) ->
     let mut breath = breathing::Breathing::new(&chirp, RMIN_M, RMAX_M);
     let (mut anchor, mut last_fnum, mut configured, mut last_est) = (f64::INFINITY, None::<u32>, false, Instant::now());
     let (mut est_fnum, mut ticks) = (None::<u32>, 0u64);
+    // baseline: steady seconds so far, when the last estimate was made, the breaths and heart rates collected
+    let (mut steady_s, mut last_tick, begun) = (0.0f64, Instant::now(), Instant::now());
+    let (mut kept, mut hearts): (Vec<(f64, f64, f64)>, Vec<f64>) = (Vec::new(), Vec::new());
     let (first_bin, end_bin) = ((RMIN_M / chirp.range_res).ceil() as usize, (RMAX_M / chirp.range_res) as usize + 1);
     let (mut seen, mut seen_frames, mut last_seen) = (vec![0.0; chirp.n_bins], 0, Instant::now());
 
@@ -163,7 +170,8 @@ pub fn measure(opts: &Options, stop: &AtomicBool, emit: &dyn Fn(&str, Value)) ->
                     row["window"] = json!(WINDOW_S);
                     let present = est.snr_db >= vitals::SNR_MIN_DB && b.br_span_mm >= vitals::SPAN_MIN_MM;
                     row["present"] = json!(present);
-                    row["quality"] = json!(quality(est.snr_db, present, &b));
+                    let q = quality(est.snr_db, present, &b);
+                    row["quality"] = json!(q);
                     // each breath that ended in the last 30 s: when it ended, how long it took, how deep it was
                     row["breaths"] = b.breaths.iter().map(|(ago, period, depth)| json!({ "t": now - ago * 1000.0, "period_s": period, "depth_mm": depth })).collect();
                     if ticks % 2 == 0 && window.len() >= win {
@@ -172,6 +180,29 @@ pub fn measure(opts: &Options, stop: &AtomicBool, emit: &dyn Fn(&str, Value)) ->
                         }
                         emit("estimate", row.clone());
                     }
+                    if let Some(need) = opts.baseline_s {
+                        // a baseline is made of steady breathing only: the clock runs while the quality is 3
+                        if q == 3 {
+                            steady_s += last_tick.elapsed().as_secs_f64().min(2.0);
+                            for (ago, period, depth) in &b.breaths {
+                                let ended = now - ago * 1000.0;
+                                if kept.last().map_or(true, |k| ended > k.0 + 1000.0) {
+                                    kept.push((ended, *period, *depth));
+                                }
+                            }
+                            hearts.extend(b.hr_bpm.filter(|_| b.hr_q >= 0.35));
+                        }
+                        row["baseline"] = json!({ "have_s": steady_s, "need_s": need });
+                        if steady_s >= need {
+                            let summary = baseline_summary(need, steady_s, begun.elapsed().as_secs_f64(), &kept, &hearts);
+                            if let Some(stem) = &opts.stem {
+                                std::fs::write(format!("{}.baseline.json", stem.display()), summary.to_string()).map_err(fatal)?;
+                            }
+                            emit("baseline", summary);
+                            stop.store(true, Relaxed);
+                        }
+                    }
+                    last_tick = Instant::now();
                     let n = b.wave.len() as f64;
                     row["wave"] = json!(b.wave);
                     row["cuts"] = b.breaths.iter().flat_map(|(ago, period, _)| [n - (ago + period) * chirp.frame_hz, n - ago * chirp.frame_hz]).filter(|i| *i >= 0.0).collect();
@@ -210,6 +241,22 @@ fn quality(snr_db: f64, present: bool, b: &breathing::Out) -> u8 {
     }
 }
 
+/// What a baseline recording found: `kept` = (end time ms, length s, depth mm) of its breaths.
+fn baseline_summary(need_s: f64, steady_s: f64, took_s: f64, kept: &[(f64, f64, f64)], hearts: &[f64]) -> Value {
+    let at = |v: Vec<f64>, p: f64| (!v.is_empty()).then(|| vitals::percentile(&v, p));
+    let periods = || kept.iter().map(|k| k.1).collect::<Vec<_>>();
+    let period = at(periods(), 0.5);
+    json!({
+        "need_s": need_s, "steady_s": steady_s, "took_s": took_s,  // took_s - steady_s was spent moving or settling
+        "breaths": kept.len(),
+        "br_period_s": period, "br_bpm": period.map(|p| 60.0 / p),
+        "br_period_iqr_s": at(periods(), 0.75).zip(at(periods(), 0.25)).map(|(a, b)| a - b),
+        "br_depth_mm": at(kept.iter().map(|k| k.2).collect(), 0.5),
+        "hr_bpm": at(hearts.to_vec(), 0.5),
+        "t_first_breath": kept.first().map(|k| k.0), "t_last_breath": kept.last().map(|k| k.0),
+    })
+}
+
 struct Running {
     session_id: Option<String>,
     stop: Arc<AtomicBool>,
@@ -240,9 +287,9 @@ fn valid_session_id(id: &str) -> bool {
 
 /// Records into Documents/shinkokyu-radar. With a typing session and that page's current clock
 /// reading: radar_<session>.*, stamped on the page's clock. Without (the aiming screen):
-/// radar_<UTC stamp>.*, stamped on this PC's clock.
+/// radar_<UTC stamp>.*, stamped on this PC's clock; with `baseline_s` it ends by itself (see Options).
 #[tauri::command(async)]
-fn start(app: tauri::AppHandle, state: tauri::State<AppState>, session: Option<String>, page_now: Option<f64>) -> Result<(), String> {
+fn start(app: tauri::AppHandle, state: tauri::State<AppState>, session: Option<String>, page_now: Option<f64>, baseline_s: Option<f64>) -> Result<(), String> {
     let clock = Clock::new();
     let clock_offset_ms = page_now.map_or(0.0, |p| p - clock.now_ms()); // taken first: the IPC delay is under a millisecond
     let mut running = state.0.lock().unwrap();
@@ -254,14 +301,14 @@ fn start(app: tauri::AppHandle, state: tauri::State<AppState>, session: Option<S
         r.stop.store(true, Relaxed);
         let _ = r.thread.join();
     }
-    if session.as_ref().is_some_and(|id| !valid_session_id(id)) {
-        return Err("invalid session id".into());
+    if session.as_ref().is_some_and(|id| !valid_session_id(id)) || baseline_s.is_some_and(|s| !(1.0..=3600.0).contains(&s)) {
+        return Err("invalid session id or baseline length".into());
     }
     let dir = app.path().document_dir().map_err(|e| e.to_string())?.join("shinkokyu-radar");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let name = session.clone().unwrap_or_else(|| utc_stamp(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()));
     let stem = Some(dir.join(format!("radar_{name}")));
-    let opts = Options { clock, clock_offset_ms, session_id: session.clone(), stem };
+    let opts = Options { clock, clock_offset_ms, session_id: session.clone(), stem, baseline_s };
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();
     let thread = std::thread::spawn(move || {
@@ -322,6 +369,15 @@ mod tests {
     fn utc_stamp_matches_the_calendar() {
         assert_eq!(super::utc_stamp(1_794_737_049), "20261115-100409");
         assert_eq!(super::utc_stamp(951_782_400), "20000229-000000");
+    }
+
+    #[test]
+    fn baseline_summary_is_the_median_breath() {
+        let kept = [(1000.0, 4.0, 2.0), (5000.0, 5.0, 3.0), (10000.0, 6.0, 4.0)];
+        let s = super::baseline_summary(180.0, 181.0, 240.0, &kept, &[70.0, 74.0]);
+        assert_eq!((s["breaths"].as_u64(), s["br_period_s"].as_f64(), s["br_bpm"].as_f64(), s["br_period_iqr_s"].as_f64()), (Some(3), Some(5.0), Some(12.0), Some(1.0)));
+        assert_eq!((s["br_depth_mm"].as_f64(), s["hr_bpm"].as_f64()), (Some(3.0), Some(72.0)));
+        assert!(super::baseline_summary(180.0, 0.0, 10.0, &[], &[])["br_period_s"].is_null());
     }
 
     #[test]

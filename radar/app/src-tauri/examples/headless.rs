@@ -11,7 +11,7 @@ fn main() {
     match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
         ["record", seconds, stem] => {
             let stop = AtomicBool::new(false);
-            let opts = Options { clock: Clock::new(), clock_offset_ms: 0.0, session_id: None, stem: Some(stem.into()) };
+            let opts = Options { clock: Clock::new(), clock_offset_ms: 0.0, session_id: None, stem: Some(stem.into()), baseline_s: None };
             std::thread::scope(|s| {
                 s.spawn(|| {
                     std::thread::sleep(std::time::Duration::from_secs_f64(seconds.parse().expect("seconds")));

@@ -17,7 +17,14 @@ body {
 }
 
 /* signal quality, like reception bars: something reflects / a person who breathes / breaths cut steadily */
-.bars { justify-self: end; display: flex; align-items: flex-end; gap: 3px; height: clamp(14px, 4vmin, 28px); }
+header { justify-self: stretch; display: flex; justify-content: space-between; align-items: center; }
+/* how many minutes of steady breathing a baseline takes; hidden while measuring */
+.base { display: flex; align-items: center; gap: .35em; color: var(--mid); font-size: clamp(14px, 3.6vmin, 24px); }
+.base svg { width: 1em; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
+.base button { width: 1.5em; aspect-ratio: 1; padding: 0; border-radius: 50%; background: none; color: inherit; font: inherit; line-height: 1; }
+.base button:hover { color: var(--ink); }
+body:not([data-state="idle"]) .base { visibility: hidden; }
+.bars { display: flex; align-items: flex-end; gap: 3px; height: clamp(14px, 4vmin, 28px); }
 .bars i { width: clamp(4px, 1.1vmin, 8px); border-radius: 2px; background: var(--soft); }
 .bars i:nth-child(1) { height: 40%; }
 .bars i:nth-child(2) { height: 70%; }
@@ -34,7 +41,7 @@ body[data-quality="3"] .bars i:nth-child(3) { background: var(--ink); }
 .small svg { width: .8em; fill: currentColor; }
 
 /* a reading that should not be trusted is shown, but pale */
-.weak, body:not([data-state="streaming"]) :is(.big, .small) { color: var(--soft); }
+.weak, body:not([data-state="streaming"]):not([data-done]) :is(.big, .small) { color: var(--soft); }
 
 canvas { width: 100%; height: 100%; }
 /* what the radar is pointed at: near on the left, far on the right, darker = stronger reflection */
@@ -57,6 +64,9 @@ button:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
 #toggle span { position: absolute; inset: 32%; border-radius: 50%; background: var(--mid); transition: border-radius .2s, background .2s; }
 #toggle:hover span { background: var(--ink); }
 body:not([data-state="idle"]) #toggle span { border-radius: 12%; }
+/* a finished baseline: full ring, dark dot, its result left on the screen */
+body[data-done] #toggle { --p: 1; background: var(--ink); }
+body[data-done] #toggle span { background: var(--ink); }
 body[data-state="streaming"] #toggle { --p: 1; }
 body:is([data-state="connecting"], [data-state="retry"], [data-state="stopping"]) #toggle { animation: wait 1.2s ease-in-out infinite; }
 @keyframes wait { 50% { opacity: .35; } }
