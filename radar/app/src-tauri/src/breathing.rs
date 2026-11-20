@@ -14,6 +14,8 @@ const MAX_S: f64 = 12.0;
 const JUMP_MM_S: f64 = 25.0; // a breathing chest stays under this
 const MOVE_MM_S: f64 = 12.0; // ... and under this once smoothed over half a second (provisional)
 const MIN_DEPTH_MM: f64 = 0.3; // shallower than this is not a breath
+const SWING_SHARE: f64 = 0.3; // a breath swings at least this share of the larger swings
+const SWING_S: f64 = 30.0; //   (75th percentile) of the last SWING_S
 pub const SELECT_S: f64 = 30.0; // the chest is looked for in this much data
 const KEEP_S: f64 = 60.0; // length of the continuous track
 // The chest is looked for among the bins that reflect at least MIN_DB over the noise floor (an empty beam shows
@@ -120,32 +122,54 @@ fn moving(vel: &[f64], fs: f64) -> Vec<bool> {
     gauss(&speed, 0.5, fs).iter().map(|v| *v > MOVE_MM_S).collect()
 }
 
-/// Breathing wave -> (start index, end index, depth mm) per breath. A breath runs from one upward zero
-/// crossing to the next, with a rise above a threshold and then a dip below minus it in between.
+/// Indices where x turns, peaks and troughs in turn: a high point counts once x has fallen th[i] below it,
+/// a low point once x has risen th[i] above it.
+fn turning_points(x: &[f64], th: &[f64]) -> Vec<usize> {
+    let (mut turns, mut up, mut lo, mut hi) = (Vec::new(), None::<bool>, 0, 0);
+    for i in 1..x.len() {
+        if x[i] < x[lo] {
+            lo = i;
+        }
+        if x[i] > x[hi] {
+            hi = i;
+        }
+        if up != Some(false) && x[hi] - x[i] >= th[i] {
+            turns.push(hi);
+            (up, lo) = (Some(false), i);
+        } else if up != Some(true) && x[i] - x[lo] >= th[i] {
+            turns.push(lo);
+            (up, hi) = (Some(true), i);
+        }
+    }
+    turns
+}
+
+/// Breathing wave -> (start index, end index, depth mm) per breath. A breath is one rise and one fall, each
+/// at least SWING_SHARE of the larger swings of the last SWING_S, whatever level the wave sits at; it runs
+/// from halfway up one rise to halfway up the next.
 fn cut_breaths(x: &[f64], fs: f64, shifting: &[bool]) -> Vec<(usize, usize, f64)> {
-    let (block, span) = ((5.0 * fs) as usize, (15.0 * fs) as usize);
-    let (mut out, mut armed, mut start, mut lo, mut hi) = (Vec::new(), false, None::<usize>, 0.0f64, 0.0f64);
+    let mut th = vec![MIN_DEPTH_MM; x.len()];
+    let small = turning_points(x, &th);
+    let (block, look) = ((5.0 * fs) as usize, (SWING_S * fs) as usize);
     let mut b0 = 0;
     while b0 < x.len() {
-        let end = (b0 + block).min(x.len());
-        let recent: Vec<f64> = x[(b0 + block).saturating_sub(span).min(end)..end].iter().map(|v| v.abs()).collect();
-        let h = (0.35 * median(&recent)).max(MIN_DEPTH_MM / 2.0);
-        for i in b0.max(1)..end {
-            lo = lo.min(x[i]);
-            hi = hi.max(x[i]);
-            armed = armed || (x[i] < -h && (hi > h || start.is_none())); // the first breath has no known start
-            if armed && x[i - 1] <= 0.0 && 0.0 < x[i] {
-                if let Some(s) = start {
-                    let still = shifting[s..i].iter().filter(|m| **m).count() as f64 <= 0.1 * (i - s) as f64;
-                    let len = (i - s) as f64 / fs;
-                    if (MIN_S..=MAX_S).contains(&len) && hi - lo >= MIN_DEPTH_MM && still {
-                        out.push((s, i, hi - lo));
-                    }
-                }
-                (start, armed, lo, hi) = (Some(i), false, 0.0, 0.0);
-            }
+        let recent: Vec<f64> = small.windows(2).filter(|w| w[1] <= b0 + block && w[1] + look > b0 + block).map(|w| (x[w[1]] - x[w[0]]).abs()).collect();
+        if recent.len() >= 3 {
+            th[b0..(b0 + block).min(x.len())].fill((SWING_SHARE * percentile(&recent, 0.75)).max(MIN_DEPTH_MM));
         }
         b0 += block;
+    }
+    let turns = turning_points(x, &th);
+    let marks: Vec<usize> = turns.windows(2).filter(|w| x[w[1]] > x[w[0]]).map(|w| w[0] + x[w[0]..=w[1]].iter().position(|v| *v >= (x[w[0]] + x[w[1]]) / 2.0).unwrap()).collect();
+    let mut out = Vec::new();
+    for w in marks.windows(2) {
+        let (a, e) = (w[0], w[1]);
+        let part = &x[a..=e];
+        let depth = part.iter().cloned().fold(f64::MIN, f64::max) - part.iter().cloned().fold(f64::MAX, f64::min);
+        let still = shifting[a..e].iter().filter(|m| **m).count() as f64 <= 0.1 * (e - a) as f64;
+        if (MIN_S..=MAX_S).contains(&((e - a) as f64 / fs)) && depth >= MIN_DEPTH_MM && still {
+            out.push((a, e, depth));
+        }
     }
     out
 }

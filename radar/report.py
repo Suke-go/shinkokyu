@@ -223,8 +223,8 @@ def main():
     bins = sorted(b for a in args for b in ([a] if a.suffix == ".bin" else a.glob("*.bin")))
     print(f"{'session':40s} {'sec':>4s} {'fps':>3s} {'drop':>4s} {'usb':>3s} {'body m':>6s} {'still':>5s} {'fast':>5s} {'seen':>5s} {'breaths':>7s} {'period':>6s} {'iqr':>4s} {'depth':>5s} {'moved':>5s} {'HR ok':>5s} {'HR':>4s} {'vs strap':>8s}")
     for b in bins:
-        if b.stat().st_size == 0:
-            print(f"{b.stem:40s} empty (no frame arrived)")
+        if b.stat().st_size < 400_000:  # about 10 s of frames: the tracker has nothing to go by before that
+            print(f"{b.stem:40s} {'empty (no frame arrived)' if b.stat().st_size == 0 else 'too short (under 10 s)'}")
             continue
         meta, rec, H, rows = load(b)
         s = summarize(meta, rec, H, rows)

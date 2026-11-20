@@ -12,8 +12,10 @@ Steps (the usual ones for FMCW vital signs, e.g. Alizadeh et al., IEEE Access 20
      (posture drift out). What is left is the breathing wave.
   4. The range bin whose wave repeats most regularly is taken as the chest, with the neighbours that move
      with it. The strongest reflection is often not the chest.
-  5. The wave is cut into breaths at its upward zero crossings. A stretch in which the body itself was
-     shifting is not counted as a breath.
+  5. The wave is cut into breaths at its rises: one rise and one fall, each a fair share of the recent
+     swings, make a breath, whatever level the wave sits at. A stretch in which the body itself was
+     shifting is not counted as a breath. Breaths faster than 35 a minute are not counted: at that speed
+     they are the size and nearly the rate of the heartbeat's motion, and this wave cannot tell them apart.
   6. Heart rate, after breathing and never against it: the spectrum of what the breathing smoother left
      over (as velocity), scored together with its second harmonic. A peak near the previous estimate is
      preferred if it is at least half as strong as the strongest: a heart rate does not jump 20 beats in 2 s.
@@ -31,6 +33,7 @@ JUMP_MM_S = 25.0  # a breathing chest stays under this
 # A deep breath in (10 mm in 1.3 s) just stays below. Provisional until checked against paced breathing.
 MOVE_MM_S = 12.0
 MIN_DEPTH_MM = 0.3  # shallower than this is not a breath
+SWING_SHARE, SWING_S = 0.3, 30.0  # a breath swings at least this share of the larger swings of the last SWING_S
 SELECT_S = 30.0  # the chest is looked for in this much data
 # The chest is looked for among the bins that reflect at least this much over the noise floor (an empty beam
 # shows 7-13 dB, a back 19-29, a chest 28-39) and lie within BODY_M of the strongest reflection: a weak bin far
@@ -91,27 +94,52 @@ def moving(vel, fs):
     return gauss(np.abs(vel), 0.5, fs) > MOVE_MM_S
 
 
+def turning_points(x, th):
+    """Indices where x turns, peaks and troughs in turn: a high point counts once x has fallen th[i] below
+    it, a low point once x has risen th[i] above it. Smaller wiggles pass unnoticed."""
+    turns, up, lo, hi = [], None, 0, 0
+    for i in range(1, len(x)):
+        if x[i] < x[lo]:
+            lo = i
+        if x[i] > x[hi]:
+            hi = i
+        if up is not False and x[hi] - x[i] >= th[i]:
+            turns.append(hi)
+            up, lo = False, i
+        elif up is not True and x[i] - x[lo] >= th[i]:
+            turns.append(lo)
+            up, hi = True, i
+    return turns
+
+
 def cut_breaths(x, fs, shifting=None):
     """Breathing wave -> [(start index, end index, depth mm)], one per breath.
 
-    A breath runs from one upward zero crossing to the next. In between, the wave must first rise above a
-    threshold and then dip below minus that threshold (about a quarter of the size of the recent
-    breathing, taken from the median so that one large movement does not raise it). Ripples around zero
-    lack one or the other and do not end a breath: the pause after a slow deep breath out is such a ripple.
+    A breath is one rise and one fall of the wave, wherever its level sits: breathing rides on what is left
+    of the posture drift, so the wave does not return to zero between breaths. To count, a rise or fall must
+    be at least SWING_SHARE of the larger swings of the last SWING_S (their 75th percentile; the rule of
+    Schaefer & Kratky 2008 for respiratory signals, with a larger share because a radar wave carries more
+    ripple than a chest belt): the ripple in the pause after a deep breath out is small next to that breath,
+    while a quiet breather's 1 mm swings are all there is and count. A breath runs from halfway up one
+    rise to halfway up the next, the steepest and so best-timed point of the wave.
     Stretches where `shifting` is True for more than a tenth of their length are dropped.
     """
-    block, span = int(5 * fs), int(15 * fs)
-    out, armed, start, lo, hi = [], False, None, 0.0, 0.0
+    floor = np.full(len(x), MIN_DEPTH_MM)
+    small = turning_points(x, floor)
+    at, size = np.array(small[1:], int), np.abs(np.diff(x[small]))
+    th, block = floor.copy(), int(5 * fs)
     for b0 in range(0, len(x), block):
-        h = max(0.35 * np.median(np.abs(x[max(b0 + block - span, 0) : b0 + block])), MIN_DEPTH_MM / 2)
-        for i in range(max(b0, 1), min(b0 + block, len(x))):
-            lo, hi = min(lo, x[i]), max(hi, x[i])
-            armed = armed or (x[i] < -h and (hi > h or start is None))  # the first breath has no known start
-            if armed and x[i - 1] <= 0 < x[i]:
-                still = shifting is None or shifting[start:i].mean() <= 0.1 if start is not None else False
-                if start is not None and MIN_S <= (i - start) / fs <= MAX_S and hi - lo >= MIN_DEPTH_MM and still:
-                    out.append((start, i, hi - lo))
-                start, armed, lo, hi = i, False, 0.0, 0.0
+        recent = size[(at <= b0 + block) & (at > b0 + block - int(SWING_S * fs))]
+        if len(recent) >= 3:
+            th[b0 : b0 + block] = max(SWING_SHARE * np.percentile(recent, 75), MIN_DEPTH_MM)
+    turns = turning_points(x, th)
+    marks = [a + int(np.argmax(x[a : b + 1] >= (x[a] + x[b]) / 2)) for a, b in zip(turns[:-1], turns[1:]) if x[b] > x[a]]
+    out = []
+    for a, e in zip(marks[:-1], marks[1:]):
+        depth = float(np.ptp(x[a : e + 1]))
+        still = shifting is None or shifting[a:e].mean() <= 0.1
+        if MIN_S <= (e - a) / fs <= MAX_S and depth >= MIN_DEPTH_MM and still:
+            out.append((a, e, depth))
     return out
 
 

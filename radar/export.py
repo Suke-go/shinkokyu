@@ -23,8 +23,8 @@ from report import N_ANT, RMAX_M
 
 SESSION_COLUMNS = [
     "session_id", "exp_id", "participant_id", "started_utc", "synced",
-    "rest_s", "rest_skipped", "rest_breaths", "rest_period_s", "rest_period_iqr_s", "rest_depth_mm", "rest_moved",
-    "task_s", "task_breaths", "task_period_s", "task_period_iqr_s", "task_depth_mm", "task_moved",
+    "rest_s", "rest_skipped", "rest_breaths", "rest_period_s", "rest_period_iqr_s", "rest_depth_mm", "rest_counted", "rest_moved",
+    "task_s", "task_breaths", "task_period_s", "task_period_iqr_s", "task_depth_mm", "task_counted", "task_moved",
     "keys", "final_chars", "source_chars", "finished", "radar_frames_dropped",
 ]
 BREATH_COLUMNS = ["session_id", "participant_id", "phase", "t_s", "utc", "period_s", "depth_mm"]
@@ -50,6 +50,7 @@ def phase_stats(breaths, shifting_share, seconds):
         "period_s": round(float(np.median(periods)), 2) if len(periods) else "",
         "period_iqr_s": round(float(np.subtract(*np.percentile(periods, [75, 25]))), 2) if len(periods) > 1 else "",
         "depth_mm": round(float(np.median([b["depth_mm"] for b in breaths])), 2) if breaths else "",
+        "counted": round(float(periods.sum()) / seconds, 3) if seconds else "",  # share of the time inside a counted breath
         "moved": round(shifting_share, 3) if shifting_share is not None else "",
     }
 

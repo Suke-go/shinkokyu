@@ -98,6 +98,15 @@ beat = harmonic + 2 * np.pi * 1.2 * 0.1 * np.cos(2 * np.pi * 1.2 * ts)  # plus a
 assert br.heart_rate(beat, fs, breath_s=4.0)[0] is None  # nothing says which one is the heart
 assert abs(br.heart_rate(beat, fs, prev=74, breath_s=4.0)[0] - 72) < 2  # the last value does
 
+# --- cutting breaths: a wave that never returns to zero; a deep breath with a ripple in its pause; heartbeat-sized ripple alone
+t = np.arange(int(60 * v.FRAME_HZ)) / v.FRAME_HZ
+cut = lambda x: [(e - a) / v.FRAME_HZ for a, e, _ in br.cut_breaths(x, v.FRAME_HZ)]
+lifted = cut(np.sin(2 * np.pi * t / 3) + 3 + 2 * np.sin(2 * np.pi * t / 40))
+assert len(lifted) >= 18 and all(abs(p - 3) < 0.3 for p in lifted), lifted
+deep = cut(4 * np.clip(np.sin(2 * np.pi * t / 9), -0.3, 1) + 0.3 * np.sin(2 * np.pi * t / 1.5))
+assert len(deep) >= 5 and all(abs(p - 9) < 1 for p in deep), deep
+assert cut(0.1 * np.sin(2 * np.pi * t / 1.0)) == []
+
 # --- chest strap: Heart Rate Measurement packets (8-bit and 16-bit rate, with and without energy field)
 import strap
 
