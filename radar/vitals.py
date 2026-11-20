@@ -34,7 +34,7 @@ N_ANT = 4
 # A person in the beam: a reflection well above the noise floor (a chest gives 28-39 dB, a back 19-29, an
 # empty beam 7-13 dB) that also moves with breathing (a chest several mm, a back 0.5-2 mm; a chair or a wall
 # stays within 0.2 mm).
-SNR_MIN_DB = 18
+SNR_MIN_DB = 16
 SPAN_MIN_MM = 0.3
 
 CONFIG = [l.strip() for l in (HERE / "chirp.cfg").read_text().splitlines() if l.strip() and not l.startswith("%")]
@@ -376,7 +376,7 @@ def main():
                                     row["present"] = bool(row["snr_db"] >= SNR_MIN_DB and row["br_span_mm"] >= SPAN_MIN_MM)
                                     # 0 nothing reflects, 1 something does, 2 a person who breathes, 3 breaths cut steadily; and why
                                     row["quality"], row["quality_why"] = (
-                                        (0, "empty") if row["snr_db"] < SNR_MIN_DB else (1, "static") if not row["present"] else (2, "moving") if b["br_moving"] > 0.2
+                                        (0, "empty") if row["snr_db"] < SNR_MIN_DB else (1, "static") if not row["present"] else (2, "moving") if b["br_moving_now"] > 0.2
                                         else (2, "few") if len(b["breaths"]) < 2 else (3, "steady"))
                                     # each breath that ended in the last 30 s: when it ended, how long it took, how deep it was
                                     row["breaths"] = [{"t": row["t"] - ago * 1000, "period_s": p, "depth_mm": d} for ago, p, d in b["breaths"]]

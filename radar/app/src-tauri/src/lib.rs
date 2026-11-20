@@ -3,6 +3,7 @@ pub mod radar;
 pub mod vitals;
 
 use radar::{Chirp, Fail, Parser, N_ANT};
+use rustfft::num_complex::Complex64;
 use serde_json::{json, Value};
 use std::collections::VecDeque;
 use std::fs::File;
@@ -46,7 +47,9 @@ pub struct Options {
 
 /// Measure until `stop` is set. Events for the UI: "status" {state, text?, progress?},
 /// "seen" {db} twice a second (reflection per range bin from RMIN_M to RMAX_M, in dB over the noise
-/// floor: what the radar is pointed at right now), "live" every second for the screen (the row below plus
+/// floor: what the radar is pointed at right now), "wave" {y} twenty times a second (the chest's displacement as
+/// it happens, mm, drift included: the screen smooths it and takes the baseline off; not recorded), "live"
+/// every second for the screen (the row below plus
 /// the breathing wave of the last 30 s and where its breaths end) and "estimate" every 2 s for the record
 /// (the row written to .hr.jsonl: t, window, present, snr_db, range_m, span_mm, br_*, hr_*, breaths).
 pub fn measure(opts: &Options, stop: &AtomicBool, emit: &dyn Fn(&str, Value)) -> Result<(), String> {
@@ -77,6 +80,10 @@ pub fn measure(opts: &Options, stop: &AtomicBool, emit: &dyn Fn(&str, Value)) ->
     let (mut est_fnum, mut ticks) = (None::<u32>, 0u64);
     let (first_bin, end_bin) = ((RMIN_M / chirp.range_res).ceil() as usize, (RMAX_M / chirp.range_res) as usize + 1);
     let (mut seen, mut seen_frames, mut last_seen) = (vec![0.0; chirp.n_bins], 0, Instant::now());
+    // the line on the screen: phase step of the chest bins, summed up frame by frame
+    let mm = chirp.wavelength / (4.0 * std::f64::consts::PI) * 1e3;
+    let (mut trace_bins, mut trace_prev, mut strongest) = (Vec::<usize>::new(), Vec::<Complex64>::new(), None::<usize>);
+    let (mut trace_at, mut trace_out) = (0.0f64, Vec::<f64>::new());
 
     let result = loop {
         // one connection; a knock on the USB cable ends it with Fail::Retry
@@ -118,6 +125,23 @@ pub fn measure(opts: &Options, stop: &AtomicBool, emit: &dyn Fn(&str, Value)) ->
                             seen[b] += bin.chunks_exact(4).map(|c| (i16::from_le_bytes([c[2], c[3]]) as f64).hypot(i16::from_le_bytes([c[0], c[1]]) as f64)).sum::<f64>();
                         }
                         seen_frames += 1;
+                        // until the tracker has found the chest, the strongest reflection stands in for it
+                        let bins = if breath.bins.is_empty() { strongest.map(|b| vec![b.saturating_sub(1), b, b + 1]).unwrap_or_default() } else { breath.bins.clone() };
+                        let z: Vec<Complex64> = bins
+                            .iter()
+                            .flat_map(|&b| iq[b * N_ANT * 4..(b + 1) * N_ANT * 4].chunks_exact(4))
+                            .map(|c| Complex64::new(i16::from_le_bytes([c[2], c[3]]) as f64, i16::from_le_bytes([c[0], c[1]]) as f64))
+                            .collect();
+                        if bins == trace_bins && !z.is_empty() {
+                            let step = z.iter().zip(&trace_prev).map(|(a, b)| a * b.conj()).sum::<Complex64>().arg() * mm;
+                            trace_at += step.clamp(-25.0 / chirp.frame_hz, 25.0 / chirp.frame_hz); // a phase jump is not chest motion
+                            trace_out.push(trace_at);
+                        }
+                        (trace_bins, trace_prev) = (bins, z);
+                        if trace_out.len() >= 2 {
+                            emit("wave", json!({ "y": trace_out }));
+                            trace_out.clear();
+                        }
                         // Earliest arrival relative to the radar's own frame clock = least USB delay.
                         // shortcut: still ~15-20 ms late (frame processing + UART) and ignores crystal
                         // drift (~50 ppm), upgrade if beat-level timing is needed.
@@ -130,6 +154,7 @@ pub fn measure(opts: &Options, stop: &AtomicBool, emit: &dyn Fn(&str, Value)) ->
                     if last_seen.elapsed() >= Duration::from_millis(500) && seen_frames > 0 {
                         let floor = vitals::noise_floor(&seen, first_bin);
                         let db: Vec<f64> = seen[first_bin..end_bin].iter().map(|a| 20.0 * (a / floor).max(1.0).log10()).collect();
+                        strongest = (0..db.len()).max_by(|a, b| db[*a].total_cmp(&db[*b])).filter(|i| db[*i] >= vitals::SNR_MIN_DB).map(|i| first_bin + i);
                         emit("seen", json!({ "db": db }));
                         seen.fill(0.0);
                         (seen_frames, last_seen) = (0, Instant::now());
@@ -203,14 +228,15 @@ pub fn measure(opts: &Options, stop: &AtomicBool, emit: &dyn Fn(&str, Value)) ->
 
 /// Signal quality, as shown by the bars on the screen, and what it rests on:
 /// 0 "empty" nothing reflects, 1 "static" something does but it does not breathe, 2 a person who breathes but
-/// cannot be followed yet ("moving" the body is shifting, "few" under two breaths cut in the last 30 s),
+/// cannot be followed yet ("moving" the body was shifting for over a fifth of the last 10 s, "few" under two
+/// breaths cut in the last 30 s),
 /// 3 "steady" (the state to start an experiment in). How regularly the wave repeats is not asked for:
 /// resting breaths vary in length by seconds and are cut all the same.
 fn quality(snr_db: f64, present: bool, b: &breathing::Out) -> (u8, &'static str) {
     match (snr_db >= vitals::SNR_MIN_DB, present) {
         (false, _) => (0, "empty"),
         (true, false) => (1, "static"),
-        (true, true) if b.br_moving > 0.2 => (2, "moving"),
+        (true, true) if b.br_moving_now > 0.2 => (2, "moving"),
         (true, true) if b.breaths.len() < 2 => (2, "few"),
         (true, true) => (3, "steady"),
     }
@@ -333,11 +359,11 @@ mod tests {
     #[test]
     fn quality_names_what_is_missing() {
         use crate::breathing::Out;
-        let steady = Out { breaths: vec![(8.0, 4.0, 2.0), (4.0, 4.0, 2.0)], br_q: 0.6, br_moving: 0.0, ..Default::default() };
+        let steady = Out { breaths: vec![(8.0, 4.0, 2.0), (4.0, 4.0, 2.0)], br_q: 0.6, ..Default::default() };
         assert_eq!(super::quality(10.0, false, &steady), (0, "empty"));
         assert_eq!(super::quality(36.0, false, &steady), (1, "static"));
         assert_eq!(super::quality(36.0, true, &steady), (3, "steady"));
-        assert_eq!(super::quality(36.0, true, &Out { br_moving: 0.5, ..Default::default() }), (2, "moving"));
+        assert_eq!(super::quality(36.0, true, &Out { br_moving_now: 0.5, ..Default::default() }), (2, "moving"));
         assert_eq!(super::quality(36.0, true, &Out::default()), (2, "few"));
         assert_eq!(super::quality(36.0, true, &Out { br_q: 0.1, breaths: steady.breaths.clone(), ..Default::default() }), (3, "steady"));
     }

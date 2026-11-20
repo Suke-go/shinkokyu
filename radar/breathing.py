@@ -32,7 +32,11 @@ JUMP_MM_S = 25.0  # a breathing chest stays under this
 MOVE_MM_S = 12.0
 MIN_DEPTH_MM = 0.3  # shallower than this is not a breath
 SELECT_S = 30.0  # the chest is looked for in this much data
-MIN_DB = 20  # bins reflecting less than this over the noise floor are not followed (15 lets far, weak bins in)
+# The chest is looked for among the bins that reflect at least this much over the noise floor (an empty beam
+# shows 7-13 dB, a back 19-29, a chest 28-39) and lie within BODY_M of the strongest reflection: a weak bin far
+# from the body is noise, however regularly it happens to move.
+MIN_DB = 16
+BODY_M = 0.25
 HEART_S = 20.0  # heart rate is estimated over this much of the track
 HEART_HZ = (0.8, 2.5)  # 48 to 150 beats a minute
 
@@ -183,12 +187,14 @@ class Breathing:
         W = H[-int(SELECT_S * fs) :]
         amp = np.abs(W).mean(axis=(0, 2))
         db = 20 * np.log10(amp / np.percentile(amp[self.rng >= self.rmin], 20))
-        cand = np.flatnonzero((self.rng >= self.rmin) & (self.rng <= self.rmax) & (db >= MIN_DB))
+        near = (self.rng >= self.rmin) & (self.rng <= self.rmax)
+        body = self.rng[int(np.argmax(np.where(near, db, -np.inf)))]
+        cand = np.flatnonzero(near & (db >= MIN_DB) & (np.abs(self.rng - body) <= BODY_M))
         n_new = min(n_new, len(W) - 1) if self.vel else len(W) - 1
         if not len(cand):
             self.vel.extend([0.0] * n_new)
             self.chest = self.hr = None
-            return {"hr_bpm": None, "hr_q": 0.0, "hr_peak_bpm": None, "br_period_s": None, "br_bpm": None, "br_q": 0.0, "br_depth_mm": 0.0, "br_range_m": None, "br_span_mm": 0.0, "br_moving": 0.0, "breaths": [], "wave": np.zeros(1), "shifting": np.zeros(1, bool)}
+            return {"hr_bpm": None, "hr_q": 0.0, "hr_peak_bpm": None, "br_period_s": None, "br_bpm": None, "br_q": 0.0, "br_depth_mm": 0.0, "br_range_m": None, "br_span_mm": 0.0, "br_moving": 0.0, "br_moving_now": 0.0, "breaths": [], "wave": np.zeros(1), "shifting": np.zeros(1, bool)}
         W = np.stack([np.stack([remove_static(W[:, c, a]) for a in range(W.shape[2])], axis=1) for c in cand], axis=1)
         vel = np.angle((W[1:] * W[:-1].conj()).sum(axis=2)) * self.mm * fs
         waves = np.array([breath_wave(v, fs) for v in vel.T])
@@ -229,6 +235,7 @@ class Breathing:
             "br_span_mm": float(2 * np.percentile(np.abs(x[-recent:]), 90)),  # how far the chest or back swings at all
             "br_range_m": float(self.rng[cand[group]].mean()),
             "br_moving": float(shifting[-recent:].mean()),  # share of the time the body itself was shifting
+            "br_moving_now": float(shifting[-int(10 * fs) :].mean()),  # the same over the last 10 s: what the quality goes by
             "breaths": breaths,
             "wave": x,
             "shifting": shifting,

@@ -16,7 +16,11 @@ const MOVE_MM_S: f64 = 12.0; // ... and under this once smoothed over half a sec
 const MIN_DEPTH_MM: f64 = 0.3; // shallower than this is not a breath
 pub const SELECT_S: f64 = 30.0; // the chest is looked for in this much data
 const KEEP_S: f64 = 60.0; // length of the continuous track
-const MIN_DB: f64 = 20.0; // bins reflecting less than this over the noise floor are not followed (15 lets far, weak bins in)
+// The chest is looked for among the bins that reflect at least MIN_DB over the noise floor (an empty beam shows
+// 7-13 dB, a back 19-29, a chest 28-39) and lie within BODY_M of the strongest reflection: a weak bin far from
+// the body is noise, however regularly it happens to move.
+const MIN_DB: f64 = 16.0;
+const BODY_M: f64 = 0.25;
 const HEART_S: f64 = 20.0;
 const HEART_HZ: (f64, f64) = (0.8, 2.5);
 
@@ -223,6 +227,8 @@ pub struct Out {
     pub br_range_m: Option<f64>,
     /// share of the last SELECT_S in which the body itself was shifting
     pub br_moving: f64,
+    /// the same over the last 10 s: what the quality on the screen goes by, so it recovers quickly
+    pub br_moving_now: f64,
     /// (seconds ago it ended, length s, depth mm) of the breaths that ended in the last SELECT_S
     #[serde(skip)]
     pub breaths: Vec<(f64, f64, f64)>,
@@ -242,15 +248,18 @@ pub struct Breathing {
     vel: VecDeque<f64>,
     chest: Option<usize>,
     hr: Option<f64>,
+    /// range bins currently taken as the chest (empty until the first update finds one)
+    pub bins: Vec<usize>,
 }
 
 impl Breathing {
     pub fn new(chirp: &Chirp, rmin: f64, rmax: f64) -> Breathing {
-        Breathing { fs: chirp.frame_hz, mm: chirp.wavelength / (4.0 * PI) * 1e3, range_res: chirp.range_res, n_bins: chirp.n_bins, rmin, rmax, vel: VecDeque::new(), chest: None, hr: None }
+        Breathing { fs: chirp.frame_hz, mm: chirp.wavelength / (4.0 * PI) * 1e3, range_res: chirp.range_res, n_bins: chirp.n_bins, rmin, rmax, vel: VecDeque::new(), chest: None, hr: None, bins: Vec::new() }
     }
 
     pub fn reset(&mut self) {
         self.vel.clear();
+        self.bins.clear();
         (self.chest, self.hr) = (None, None);
     }
 
@@ -267,7 +276,10 @@ impl Breathing {
             row.iter().enumerate().for_each(|(i, v)| amp[i / N_ANT] += v.norm());
         }
         let floor = noise_floor(&amp, (self.rmin / self.range_res).ceil() as usize);
-        let cand: Vec<usize> = (0..self.n_bins).filter(|&b| range(b) >= self.rmin && range(b) <= self.rmax && 20.0 * (amp[b] / floor).log10() >= MIN_DB).collect();
+        let db: Vec<f64> = amp.iter().map(|a| 20.0 * (a / floor).log10()).collect();
+        let near: Vec<usize> = (0..self.n_bins).filter(|&b| range(b) >= self.rmin && range(b) <= self.rmax).collect();
+        let body = near.iter().copied().max_by(|a, b| db[*a].total_cmp(&db[*b])).map_or(0.0, range);
+        let cand: Vec<usize> = near.into_iter().filter(|&b| db[b] >= MIN_DB && (range(b) - body).abs() <= BODY_M).collect();
         let n_new = if self.vel.is_empty() { t - 1 } else { n_new.min(t - 1) };
         let push = |vel: &mut VecDeque<f64>, v: f64| {
             if vel.len() == (KEEP_S * fs) as usize {
@@ -277,6 +289,7 @@ impl Breathing {
         };
         if cand.is_empty() {
             (0..n_new).for_each(|_| push(&mut self.vel, 0.0));
+            self.bins.clear();
             (self.chest, self.hr) = (None, None);
             return Out::default();
         }
@@ -314,6 +327,7 @@ impl Breathing {
         if group.is_empty() {
             group.push(best);
         }
+        self.bins = group.iter().map(|&i| cand[i]).collect();
         for ti in t - 1 - n_new..t - 1 {
             push(&mut self.vel, group.iter().map(|&i| vel[i][ti]).sum::<f64>() / group.len() as f64);
         }
@@ -345,6 +359,10 @@ impl Breathing {
             br_span_mm: 2.0 * percentile(&recent.iter().map(|v| v.abs()).collect::<Vec<_>>(), 0.9),
             br_range_m: Some(group.iter().map(|&i| range(cand[i])).sum::<f64>() / group.len() as f64),
             br_moving: shifting[first..].iter().filter(|m| **m).count() as f64 / (shifting.len() - first) as f64,
+            br_moving_now: {
+                let recent = &shifting[shifting.len().saturating_sub((10.0 * fs) as usize)..];
+                recent.iter().filter(|m| **m).count() as f64 / recent.len() as f64
+            },
             breaths,
             wave: recent.to_vec(),
         }
