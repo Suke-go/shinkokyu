@@ -32,12 +32,12 @@ plt.rcParams["axes.spines.top"] = plt.rcParams["axes.spines.right"] = False
 REPO = Path(__file__).parent.parent
 
 
-def key_times(session_id):
-    """Times [ms, typing page's clock] of the keys pressed in a typing session: from the local server's
-    data folder if the session is there, else from Supabase. Empty if neither has it."""
-    local = REPO / "data" / f"{session_id}.events.jsonl"
+def key_times(session_id, folder):
+    """Times [ms, typing page's clock] of the keys pressed in a typing session: from the app's own copy
+    next to the radar recording, else the local server's data folder, else Supabase. Empty if none has it."""
+    local = next((f for f in (folder / f"typing_{session_id}.events.jsonl", REPO / "data" / f"{session_id}.events.jsonl") if f.exists()), None)
     try:
-        if local.exists():
+        if local:
             events = [json.loads(l) for l in local.read_text(encoding="utf-8").splitlines() if l.strip()]
         else:
             cfg = (REPO / "public/shared/config.js").read_text(encoding="utf-8")
@@ -70,7 +70,7 @@ def load(bin_path):
     for r in rows:
         r["s"] = (r["t"] - rec["t"][0]) / 1000
     # a recording made during a typing task is on the typing page's clock, the same clock as the key events
-    meta["keys_s"] = (key_times(meta["sessionId"]) - rec["t"][0]) / 1000 if meta.get("sessionId") else np.array([])
+    meta["keys_s"] = (key_times(meta["sessionId"], bin_path.parent) - rec["t"][0]) / 1000 if meta.get("sessionId") else np.array([])
     # chest strap logged alongside (strap.py): its mean rate over the same 20 s as each estimate
     rr_path = bin_path.with_suffix("").with_suffix(".rr.jsonl")
     notes = [json.loads(l) for l in rr_path.read_text().splitlines()] if rr_path.exists() else []

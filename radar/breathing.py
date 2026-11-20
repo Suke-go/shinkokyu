@@ -4,6 +4,8 @@ The chest's displacement is split by time scale: what a wide Gaussian follows is
 Gaussian follows on top of that is breathing, and what is left over holds the heartbeat.
 
 Steps (the usual ones for FMCW vital signs, e.g. Alizadeh et al., IEEE Access 2019; TI's vital signs lab):
+  0. A static reflection sharing the bin (a chair back when measuring from behind, clothing, a desk edge) is
+     subtracted where it is stronger than the moving one: left in, it shrinks and bends the phase swing.
   1. Chest velocity per range bin, from the phase step between frames summed over the antennas.
   2. Steps no breathing chest could make are clipped: they are phase jumps or the body shifting.
   3. Displacement, smoothed with a Gaussian (noise and heartbeat out) minus a wide Gaussian of itself
@@ -33,6 +35,19 @@ SELECT_S = 30.0  # the chest is looked for in this much data
 MIN_DB = 20  # bins reflecting less than this over the noise floor are not considered
 HEART_S = 20.0  # heart rate is estimated over this much of the track
 HEART_HZ = (0.8, 2.5)  # 48 to 150 beats a minute
+
+
+def remove_static(z):
+    """z: complex samples of one range bin on one antenna. A moving reflector draws an arc around whatever
+    static reflection shares the bin; the arc's centre is that static part (least-squares circle fit).
+    It is subtracted only if the fit is a real arc and the static part is the stronger one."""
+    m = z.mean()
+    x, y = (z - m).real, (z - m).imag
+    sol, *_ = np.linalg.lstsq(np.c_[2 * x, 2 * y, np.ones(len(z))], x * x + y * y, rcond=None)
+    c = sol[0] + 1j * sol[1]
+    r = np.sqrt(max(sol[2] + abs(c) ** 2, 0.0))
+    arc = r > 0 and np.sqrt(np.mean((np.abs(z - m - c) - r) ** 2)) < 0.3 * r
+    return z - (m + c) if arc and abs(m + c) > r else z
 
 
 def gauss(x, sigma_s, fs):
@@ -160,8 +175,9 @@ class Breathing:
         if not len(cand):
             self.vel.extend([0.0] * n_new)
             self.chest = self.hr = None
-            return {"hr_bpm": None, "hr_q": 0.0, "hr_peak_bpm": None, "br_period_s": None, "br_bpm": None, "br_q": 0.0, "br_depth_mm": 0.0, "br_range_m": None, "br_moving": 0.0, "breaths": [], "wave": np.zeros(1), "shifting": np.zeros(1, bool)}
-        vel = np.angle((W[1:, cand] * W[:-1, cand].conj()).sum(axis=2)) * self.mm * fs
+            return {"hr_bpm": None, "hr_q": 0.0, "hr_peak_bpm": None, "br_period_s": None, "br_bpm": None, "br_q": 0.0, "br_depth_mm": 0.0, "br_range_m": None, "br_span_mm": 0.0, "br_moving": 0.0, "breaths": [], "wave": np.zeros(1), "shifting": np.zeros(1, bool)}
+        W = np.stack([np.stack([remove_static(W[:, c, a]) for a in range(W.shape[2])], axis=1) for c in cand], axis=1)
+        vel = np.angle((W[1:] * W[:-1].conj()).sum(axis=2)) * self.mm * fs
         waves = np.array([breath_wave(v, fs) for v in vel.T])
         regular = np.array([period_of(w, fs)[1] for w in waves])
         best = int(regular.argmax())
@@ -197,6 +213,7 @@ class Breathing:
             "br_bpm": None if np.isnan(period) else 60 / period,
             "br_q": q,
             "br_depth_mm": float(np.median([b[2] for b in breaths])) if breaths else float(np.ptp(x[-recent:])),
+            "br_span_mm": float(2 * np.percentile(np.abs(x[-recent:]), 90)),  # how far the chest or back swings at all
             "br_range_m": float(self.rng[cand[group]].mean()),
             "br_moving": float(shifting[-recent:].mean()),  # share of the time the body itself was shifting
             "breaths": breaths,

@@ -1,5 +1,12 @@
 type Status = { state: string; text?: string; progress?: number };
-type Estimate = { present: boolean; hr_bpm: number | null; hr_q: number | null; br_bpm: number | null; disp: number[] };
+type Live = {
+  quality: number; // 0-3, see the bars in index.html
+  br_bpm: number | null;
+  hr_bpm: number | null;
+  hr_q: number;
+  wave: number[]; // breathing wave of the last 30 s, mm
+  cuts: number[]; // indices into `wave` where a breath starts or ends
+};
 type Seen = { db: number[] };
 type Stopped = { error: string | null };
 type Win = { once(event: string, fn: () => void): void; setFocus(): Promise<void> };
@@ -19,12 +26,13 @@ const { WebviewWindow } = window.__TAURI__.webviewWindow;
 
 const el = (id: string) => document.getElementById(id)!;
 const hr = el("hr"), br = el("br"), note = el("note"), toggle = el("toggle");
-const canvas = el("trace") as HTMLCanvasElement;
+const canvas = el("trace") as HTMLCanvasElement, strip = el("seen") as HTMLCanvasElement;
 const setState = (s: string) => { document.body.dataset.state = s; };
-const strip = el("seen") as HTMLCanvasElement;
-let trace: number[] = [];
-let seen: number[] = [];
+const setQuality = (q: number) => { document.body.dataset.quality = String(q); };
+const css = (name: string) => getComputedStyle(document.body).getPropertyValue(name);
+let trace: number[] = [], cuts: number[] = [], seen: number[] = [];
 let mine = false; // this window started the measurement (a typing session starts its own)
+let estimating = false; // "live" has started: it decides the quality from here on
 
 function show(box: HTMLElement, value: number | null, trusted: boolean) {
   box.querySelector("output")!.textContent = value == null ? "–" : String(Math.round(value));
@@ -33,18 +41,25 @@ function show(box: HTMLElement, value: number | null, trusted: boolean) {
 
 function draw() {
   const dpr = window.devicePixelRatio || 1;
-  const w = canvas.clientWidth * dpr, h = canvas.clientHeight * dpr;
-  canvas.width = w;
-  canvas.height = h;
+  const w = (canvas.width = canvas.clientWidth * dpr), h = (canvas.height = canvas.clientHeight * dpr);
   const g = canvas.getContext("2d")!;
   if (trace.length < 2) return;
+  const x = (i: number) => (i / (trace.length - 1)) * w;
+  g.lineWidth = dpr;
+  g.strokeStyle = css("--soft");
+  for (const c of cuts) {
+    g.beginPath();
+    g.moveTo(x(c), 0);
+    g.lineTo(x(c), h);
+    g.stroke();
+  }
   const lo = Math.min(...trace), hi = Math.max(...trace);
   const mid = (lo + hi) / 2, span = Math.max(hi - lo, 2); // at least 2 mm tall, so noise does not fill the view
   g.beginPath();
-  trace.forEach((v, i) => g.lineTo((i / (trace.length - 1)) * w, h / 2 - ((v - mid) / span) * h * 0.9));
+  trace.forEach((v, i) => g.lineTo(x(i), h / 2 - ((v - mid) / span) * h * 0.9));
   g.lineWidth = 1.5 * dpr;
   g.lineJoin = "round";
-  g.strokeStyle = getComputedStyle(document.body).getPropertyValue("--mid");
+  g.strokeStyle = css("--mid");
   g.stroke();
 }
 new ResizeObserver(draw).observe(canvas);
@@ -60,14 +75,14 @@ function drawSeen() {
 new ResizeObserver(drawSeen).observe(strip);
 
 function reset() {
-  mine = false;
+  mine = estimating = false;
   setState("idle");
+  setQuality(0);
   toggle.setAttribute("aria-label", "測定開始");
   toggle.style.removeProperty("--p");
-  show(hr, null, true);
   show(br, null, true);
-  trace = [];
-  seen = [];
+  show(hr, null, true);
+  trace = cuts = seen = [];
   draw();
   drawSeen();
 }
@@ -100,22 +115,27 @@ el("dash").onclick = () => open("dash", "site/dashboard/", "ダッシュボー�
 listen<Status>("status", ({ payload: s }) => {
   if (document.body.dataset.state !== "stopping") setState(s.state);
   if (s.progress != null) toggle.style.setProperty("--p", String(s.progress));
+  if (s.state !== "collecting") estimating = false;
   note.textContent = s.state === "retry" ? (s.text ?? "") : "";
-});
-
-listen<Estimate>("estimate", ({ payload: e }) => {
-  if (document.body.dataset.state !== "stopping") setState("streaming");
-  // nothing in the beam: no numbers at all, rather than numbers made from noise
-  show(hr, e.present ? e.hr_bpm : null, (e.hr_q ?? 0) >= 0.35);
-  show(br, e.present ? e.br_bpm : null, true);
-  if (e.hr_bpm) (hr.querySelector("svg") as SVGElement).style.animationDuration = `${60 / e.hr_bpm}s`;
-  trace = e.present ? e.disp : [];
-  draw();
 });
 
 listen<Seen>("seen", ({ payload }) => {
   seen = payload.db;
   drawSeen();
+  // before the first estimate, the reflection alone gives the first bar
+  if (!estimating) setQuality(Math.max(...seen) >= 26 ? 1 : 0);
+});
+
+listen<Live>("live", ({ payload: e }) => {
+  if (document.body.dataset.state !== "stopping") setState("streaming");
+  estimating = true;
+  setQuality(e.quality);
+  // without a person there are no numbers at all, rather than numbers made from noise
+  show(br, e.quality >= 2 ? e.br_bpm : null, e.quality >= 3);
+  show(hr, e.quality >= 2 ? e.hr_bpm : null, e.hr_q >= 0.35);
+  trace = e.quality >= 2 ? e.wave : [];
+  cuts = e.quality >= 2 ? e.cuts : [];
+  draw();
 });
 
 listen<Stopped>("stopped", ({ payload }) => {

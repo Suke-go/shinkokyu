@@ -1,3 +1,4 @@
+pub mod breathing;
 pub mod radar;
 pub mod vitals;
 
@@ -44,8 +45,10 @@ pub struct Options {
 }
 
 /// Measure until `stop` is set. Events for the UI: "status" {state, text?, progress?},
-/// "seen" {db} twice a second (reflection per range bin from RMIN_M to RMAX_M, in dB over
-/// the noise floor: what the radar is pointed at right now) and "estimate" {t, window, ...Estimate, disp}.
+/// "seen" {db} twice a second (reflection per range bin from RMIN_M to RMAX_M, in dB over the noise
+/// floor: what the radar is pointed at right now), "live" every second for the screen (the row below plus
+/// the breathing wave of the last 30 s and where its breaths end) and "estimate" every 2 s for the record
+/// (the row written to .hr.jsonl: t, window, present, snr_db, range_m, span_mm, br_*, hr_*, breaths).
 pub fn measure(opts: &Options, stop: &AtomicBool, emit: &dyn Fn(&str, Value)) -> Result<(), String> {
     let es = |e: std::io::Error| e.to_string();
     let chirp = Chirp::load();
@@ -59,6 +62,7 @@ pub fn measure(opts: &Options, stop: &AtomicBool, emit: &dyn Fn(&str, Value)) ->
             "window": WINDOW_S, "rmin": RMIN_M, "rmax": RMAX_M,
             "bin": format!("records of {{t: float64 local arrival ms, fnum: uint32, iq: int16[{}][{N_ANT}][imag,real]}}", chirp.n_bins),
             "sessionId": opts.session_id,
+            "clockOffsetMs": opts.clock_offset_ms,  // typing page's clock minus this PC's clock, measured when the session started
             "clock": if opts.session_id.is_some() { "the typing page's local clock: convert with that session's syncs" } else { "this PC's clock, unsynced" },
         });
         std::fs::write(path("json"), meta.to_string()).map_err(es)?;
@@ -66,8 +70,11 @@ pub fn measure(opts: &Options, stop: &AtomicBool, emit: &dyn Fn(&str, Value)) ->
         hr_log = Some(File::create(path("hr.jsonl")).map_err(es)?);
     }
     let win = (WINDOW_S * chirp.frame_hz) as usize;
-    let mut window: VecDeque<(u32, Vec<u8>)> = VecDeque::with_capacity(win);
+    let keep = win.max((breathing::SELECT_S * chirp.frame_hz) as usize); // breathing looks further back than the rest
+    let mut window: VecDeque<(u32, Vec<u8>)> = VecDeque::with_capacity(keep);
+    let mut breath = breathing::Breathing::new(&chirp, RMIN_M, RMAX_M);
     let (mut anchor, mut last_fnum, mut configured, mut last_est) = (f64::INFINITY, None::<u32>, false, Instant::now());
+    let (mut est_fnum, mut ticks) = (None::<u32>, 0u64);
     let (first_bin, end_bin) = ((RMIN_M / chirp.range_res).ceil() as usize, (RMAX_M / chirp.range_res) as usize + 1);
     let (mut seen, mut seen_frames, mut last_seen) = (vec![0.0; chirp.n_bins], 0, Instant::now());
 
@@ -103,6 +110,8 @@ pub fn measure(opts: &Options, stop: &AtomicBool, emit: &dyn Fn(&str, Value)) ->
                             // sensor was restarted: new frame clock
                             anchor = f64::INFINITY;
                             window.clear();
+                            breath.reset();
+                            est_fnum = None;
                         }
                         last_fnum = Some(fnum);
                         for (b, bin) in iq.chunks_exact(N_ANT * 4).enumerate() {
@@ -113,7 +122,7 @@ pub fn measure(opts: &Options, stop: &AtomicBool, emit: &dyn Fn(&str, Value)) ->
                         // shortcut: still ~15-20 ms late (frame processing + UART) and ignores crystal
                         // drift (~50 ppm), upgrade if beat-level timing is needed.
                         anchor = anchor.min(t - fnum as f64 * chirp.frame_ms);
-                        if window.len() == win {
+                        if window.len() == keep {
                             window.pop_front();
                         }
                         window.push_back((fnum, iq));
@@ -125,28 +134,48 @@ pub fn measure(opts: &Options, stop: &AtomicBool, emit: &dyn Fn(&str, Value)) ->
                         seen.fill(0.0);
                         (seen_frames, last_seen) = (0, Instant::now());
                     }
-                    if last_est.elapsed() < Duration::from_secs(2) {
+                    if last_est.elapsed() < Duration::from_secs(1) {
                         continue;
                     }
                     last_est = Instant::now();
+                    ticks += 1;
                     if let Some(rec) = &mut rec {
                         rec.flush().map_err(fatal)?;
                     }
-                    if window.len() < win {
-                        emit("status", json!({ "state": "collecting", "progress": window.len() as f64 / win as f64 }));
+                    // the screen starts after 10 s (enough to see a couple of breaths), the record after 20 s
+                    let first = win / 2;
+                    if window.len() < first {
+                        emit("status", json!({ "state": "collecting", "progress": window.len() as f64 / first as f64 }));
                         continue;
                     }
                     let fnums: Vec<u32> = window.iter().map(|f| f.0).collect();
                     let frames: Vec<&[u8]> = window.iter().map(|f| f.1.as_slice()).collect();
-                    let est = vitals::analyze(&fnums, &frames, &chirp, RMIN_M, RMAX_M);
+                    let h = vitals::grid(&fnums, &frames);
+                    let (last, w) = (fnums[fnums.len() - 1], chirp.n_bins * N_ANT);
+                    let est = vitals::analyze(&h[h.len() - win.min(h.len() / w) * w..], &chirp, RMIN_M, RMAX_M);
+                    // breathing and heart rate from the one chest track; they replace the pooled-bin values
+                    let b = breath.update(&h, est_fnum.map_or(usize::MAX, |f| (last - f) as usize));
+                    est_fnum = Some(last);
+                    let now = anchor + last as f64 * chirp.frame_ms;
                     let mut row = serde_json::to_value(&est).unwrap();
-                    row["t"] = json!(anchor + fnums[win - 1] as f64 * chirp.frame_ms);
+                    row.as_object_mut().unwrap().extend(serde_json::to_value(&b).unwrap().as_object().unwrap().clone());
+                    row["t"] = json!(now);
                     row["window"] = json!(WINDOW_S);
-                    if let Some(log) = &mut hr_log {
-                        writeln!(log, "{row}").map_err(fatal)?;
+                    let present = est.snr_db >= vitals::SNR_MIN_DB && b.br_span_mm >= vitals::SPAN_MIN_MM;
+                    row["present"] = json!(present);
+                    row["quality"] = json!(quality(est.snr_db, present, &b));
+                    // each breath that ended in the last 30 s: when it ended, how long it took, how deep it was
+                    row["breaths"] = b.breaths.iter().map(|(ago, period, depth)| json!({ "t": now - ago * 1000.0, "period_s": period, "depth_mm": depth })).collect();
+                    if ticks % 2 == 0 && window.len() >= win {
+                        if let Some(log) = &mut hr_log {
+                            writeln!(log, "{row}").map_err(fatal)?;
+                        }
+                        emit("estimate", row.clone());
                     }
-                    row["disp"] = json!(est.disp_mm);
-                    emit("estimate", row);
+                    let n = b.wave.len() as f64;
+                    row["wave"] = json!(b.wave);
+                    row["cuts"] = b.breaths.iter().flat_map(|(ago, period, _)| [n - (ago + period) * chirp.frame_hz, n - ago * chirp.frame_hz]).filter(|i| *i >= 0.0).collect();
+                    emit("live", row);
                 }
                 Ok(())
             };
@@ -168,6 +197,17 @@ pub fn measure(opts: &Options, stop: &AtomicBool, emit: &dyn Fn(&str, Value)) ->
         rec.flush().map_err(es)?;
     }
     result
+}
+
+/// Signal quality, as shown by the bars on the screen: 0 nothing reflects, 1 something does, 2 it is a person
+/// who breathes, 3 the breaths are being cut steadily (the state to start an experiment in).
+fn quality(snr_db: f64, present: bool, b: &breathing::Out) -> u8 {
+    match (snr_db >= vitals::SNR_MIN_DB, present) {
+        (false, _) => 0,
+        (true, false) => 1,
+        (true, true) if b.breaths.len() >= 2 && b.br_q >= 0.3 && b.br_moving <= 0.2 => 3,
+        (true, true) => 2,
+    }
 }
 
 struct Running {
@@ -243,10 +283,25 @@ fn stop(state: tauri::State<AppState>, session: Option<String>) {
     }
 }
 
+/// Keeps the typing session on this PC too, next to the radar recording and in the typing server's own
+/// format: typing_<session>.json (the session's meta, rewritten whole) and typing_<session>.events.jsonl
+/// (appended to). Returns the folder.
+#[tauri::command(async)]
+fn save_typing(app: tauri::AppHandle, session: String, name: String, text: String, append: bool) -> Result<String, String> {
+    if !valid_session_id(&session) || !["json", "events.jsonl"].contains(&name.as_str()) || text.len() > 5 << 20 {
+        return Err("invalid typing record".into());
+    }
+    let dir = app.path().document_dir().map_err(|e| e.to_string())?.join("shinkokyu-radar");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let mut file = std::fs::OpenOptions::new().create(true).append(append).write(true).truncate(!append).open(dir.join(format!("typing_{session}.{name}"))).map_err(|e| e.to_string())?;
+    file.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(dir.display().to_string())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
-        .invoke_handler(tauri::generate_handler![start, stop])
+        .invoke_handler(tauri::generate_handler![start, stop, save_typing])
         .build(tauri::generate_context!())
         .expect("failed to start")
         .run(|app, event| {

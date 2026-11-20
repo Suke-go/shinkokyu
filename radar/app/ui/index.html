@@ -6,16 +6,17 @@
   <title>shinkokyu radar</title>
   <link rel="stylesheet" href="style.css">
 </head>
-<body data-state="idle">
-  <div class="hr" id="hr" aria-label="心拍数（毎分）">
-    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s-7.5-4.6-9.6-9.2C.9 8.4 2.6 4.5 6.3 4.5c2.2 0 3.9 1.2 5.7 3.4 1.8-2.2 3.5-3.4 5.7-3.4 3.7 0 5.4 3.9 3.9 7.3C19.5 16.4 12 21 12 21z"/></svg>
-    <output>–</output>
-  </div>
-  <div class="br" id="br" aria-label="呼吸数（毎分）">
+<body data-state="idle" data-quality="0">
+  <div class="bars" id="bars" role="img" aria-label="信号の質（1本: 何かが映っている、2本: 呼吸している人が映っている、3本: 呼吸が安定して区切れている）"><i></i><i></i><i></i></div>
+  <div class="big" id="br" aria-label="呼吸数（毎分）">
     <svg viewBox="0 0 48 24" aria-hidden="true"><path d="M2 12c5-12 9-12 14 0s9 12 14 0 9-12 14 0"/></svg>
     <output>–</output>
   </div>
-  <canvas id="trace" aria-label="胸の変位（直近20秒）"></canvas>
+  <div class="small" id="hr" aria-label="心拍数（毎分）">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s-7.5-4.6-9.6-9.2C.9 8.4 2.6 4.5 6.3 4.5c2.2 0 3.9 1.2 5.7 3.4 1.8-2.2 3.5-3.4 5.7-3.4 3.7 0 5.4 3.9 3.9 7.3C19.5 16.4 12 21 12 21z"/></svg>
+    <output>–</output>
+  </div>
+  <canvas id="trace" aria-label="呼吸の波形（直近30秒。縦の線は1呼吸の区切り）"></canvas>
   <canvas id="seen" aria-label="レーダーに映っているもの（左が近く、右が遠く。濃いほど強い反射）"></canvas>
   <nav>
     <button class="go" id="task" aria-label="タイピング課題を開く">

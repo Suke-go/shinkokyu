@@ -13,7 +13,16 @@ export const MODE = await (async () => {
     const r = await fetch("/api/time", { cache: "no-store" });
     if (r.ok && Number.isFinite((await r.json()).t1)) return "server";
   } catch { /* no server */ }
-  return SB_URL ? "supabase" : "static";
+  if (!SB_URL) return "static";
+  if (window.__TAURI__) { // the desktop app keeps the record on its own PC, so without a network it carries on alone
+    try {
+      const stop = new AbortController();
+      setTimeout(() => stop.abort(), 4000);
+      const r = await fetch(SB_URL + "/rest/v1/rpc/server_time", { method: "POST", headers: { apikey: SUPABASE.key, "Content-Type": "application/json" }, body: "{}", signal: stop.signal });
+      if (!r.ok) return "static";
+    } catch { return "static"; }
+  }
+  return "supabase";
 })();
 export const timeUrl = MODE === "server" ? "/api/time" : null;
 

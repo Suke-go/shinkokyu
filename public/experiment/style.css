@@ -80,7 +80,8 @@ body { overflow: hidden; }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--ink-3); }
 .dot.good { background: var(--ok); }
 .dot.bad { background: #D69E00; }
-/* desktop app only: pale until heart-rate estimates are arriving */
+#done-id { white-space: pre-line; overflow-wrap: anywhere; }
+/* desktop app only: pale until a breathing person is in the radar's beam */
 .radar { margin-left: var(--s2); font-style: normal; color: var(--line); }
 .radar.on { color: var(--ink-2); }
 

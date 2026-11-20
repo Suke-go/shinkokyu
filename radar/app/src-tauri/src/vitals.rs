@@ -5,23 +5,28 @@ use serde::Serialize;
 use std::f64::consts::PI;
 
 /// A person in the beam: a reflection well above the noise floor (a body gives 28-39 dB, an empty
-/// beam 7-13 dB) that also moves with breathing (millimetres; a chair or a wall stays within 0.2 mm).
+/// beam 7-13 dB) that also moves with breathing (a chest several mm, a back 0.5-2 mm; a chair or a wall
+/// stays within 0.2 mm). lib.rs combines the two.
 pub const SNR_MIN_DB: f64 = 26.0;
-pub const SPAN_MIN_MM: f64 = 0.5;
+pub const SPAN_MIN_MM: f64 = 0.3;
 
 /// 20th percentile of the per-bin reflection amplitude from `first` on: the level of bins with nothing in them.
-pub fn noise_floor(amp: &[f64], first: usize) -> f64 {
-    let mut a = amp[first..].to_vec();
+/// Percentile `p` (0..1) with linear interpolation, as numpy does it.
+pub fn percentile(v: &[f64], p: f64) -> f64 {
+    let mut a = v.to_vec();
     a.sort_by(f64::total_cmp);
-    let pos = 0.2 * (a.len() - 1) as f64;
+    let pos = p * (a.len() - 1) as f64;
     let (i, frac) = (pos as usize, pos.fract());
     a[i] + frac * (a[(i + 1).min(a.len() - 1)] - a[i])
 }
 
+/// 20th percentile of the per-bin reflection amplitude from `first` on: the level of bins with nothing in them.
+pub fn noise_floor(amp: &[f64], first: usize) -> f64 {
+    percentile(&amp[first..], 0.2)
+}
+
 #[derive(Serialize)]
 pub struct Estimate {
-    /// a person is in the beam; without one the rates below are noise
-    pub present: bool,
     /// reflection of the measured bins over the noise floor
     pub snr_db: f64,
     pub range_m: f64,
@@ -32,7 +37,6 @@ pub struct Estimate {
     pub hr_bpm: f64,
     /// share of the heart band's power within 0.1 Hz of the peak
     pub hr_q: f64,
-    pub hr_harmonic: bool,
     #[serde(skip)]
     pub disp_mm: Vec<f64>,
 }
@@ -84,10 +88,9 @@ fn band_peak(sig: &[f64], fs: f64, lo: f64, hi: f64) -> (f64, f64, Vec<f64>) {
     (k as f64 * df, near / total, y.iter().map(|c| c.re / nf).collect())
 }
 
-/// `frames[i]` is the heatmap payload of frame number `fnums[i]` (increasing).
-pub fn analyze(fnums: &[u32], frames: &[&[u8]], chirp: &Chirp, rmin: f64, rmax: f64) -> Estimate {
-    let (nb, w) = (chirp.n_bins, chirp.n_bins * N_ANT);
-    // complex [time][bin * N_ANT + antenna] on a uniform grid: a dropped frame repeats the previous one
+/// Complex [time][bin * N_ANT + antenna] on a uniform time grid: `frames[i]` is the heatmap payload of
+/// frame number `fnums[i]` (increasing), and a dropped frame repeats the previous one.
+pub fn grid(fnums: &[u32], frames: &[&[u8]]) -> Vec<Complex64> {
     let mut h: Vec<Complex64> = Vec::new();
     let mut j = 0;
     for g in fnums[0]..=fnums[fnums.len() - 1] {
@@ -96,6 +99,12 @@ pub fn analyze(fnums: &[u32], frames: &[&[u8]], chirp: &Chirp, rmin: f64, rmax: 
         }
         h.extend(frames[j].chunks_exact(4).map(|c| Complex64::new(i16::from_le_bytes([c[2], c[3]]) as f64, i16::from_le_bytes([c[0], c[1]]) as f64)));
     }
+    h
+}
+
+/// Reflection strength and the pooled-bin estimates over `h` (see `grid`).
+pub fn analyze(h: &[Complex64], chirp: &Chirp, rmin: f64, rmax: f64) -> Estimate {
+    let (nb, w) = (chirp.n_bins, chirp.n_bins * N_ANT);
     let t = h.len() / w;
 
     let mut mean = vec![Complex64::default(); w];
@@ -139,7 +148,6 @@ pub fn analyze(fnums: &[u32], frames: &[&[u8]], chirp: &Chirp, rmin: f64, rmax: 
     let (lo, hi) = br_sig.iter().fold((f64::MAX, f64::MIN), |(a, b), v| (a.min(*v), b.max(*v)));
     let snr_db = 20.0 * (bins.iter().map(|&b| amp[b]).fold(0.0, f64::max) / floor).log10();
     Estimate {
-        present: snr_db >= SNR_MIN_DB && hi - lo >= SPAN_MIN_MM,
         snr_db,
         range_m: bins.iter().map(|&b| range(b) * motion[b]).sum::<f64>() / bins.iter().map(|&b| motion[b]).sum::<f64>(),
         span_mm: hi - lo,
@@ -147,7 +155,6 @@ pub fn analyze(fnums: &[u32], frames: &[&[u8]], chirp: &Chirp, rmin: f64, rmax: 
         br_q,
         hr_bpm: hr_f * 60.0,
         hr_q,
-        hr_harmonic: (2..7).any(|k| (hr_f - k as f64 * br_f).abs() < 0.05),
         disp_mm,
     }
 }
@@ -191,8 +198,8 @@ mod tests {
         let chirp = Chirp::load();
         let (fnums, frames) = scene(&chirp, 2000.0, 3e-3);
         let refs: Vec<&[u8]> = frames.iter().map(Vec::as_slice).collect();
-        let e = analyze(&fnums, &refs, &chirp, 0.3, 1.5);
-        assert!(e.present && e.snr_db > SNR_MIN_DB, "snr {}", e.snr_db);
+        let e = analyze(&grid(&fnums, &refs), &chirp, 0.3, 1.5);
+        assert!(e.snr_db > SNR_MIN_DB, "snr {}", e.snr_db);
         assert!((e.range_m - 0.6).abs() < chirp.range_res, "range {}", e.range_m);
         assert!((e.br_bpm - 18.0).abs() < 1.5, "br {}", e.br_bpm);
         assert!((e.hr_bpm - 69.0).abs() < 3.0, "hr {}", e.hr_bpm);
@@ -206,8 +213,8 @@ mod tests {
         for (body, snr_ok) in [(0.0, false), (2000.0, true)] {
             let (fnums, frames) = scene(&chirp, body, 0.0);
             let refs: Vec<&[u8]> = frames.iter().map(Vec::as_slice).collect();
-            let e = analyze(&fnums, &refs, &chirp, 0.3, 1.5);
-            assert!(!e.present && (e.snr_db >= SNR_MIN_DB) == snr_ok, "body {body}: snr {} span {}", e.snr_db, e.span_mm);
+            let e = analyze(&grid(&fnums, &refs), &chirp, 0.3, 1.5);
+            assert!(e.span_mm < SPAN_MIN_MM && (e.snr_db >= SNR_MIN_DB) == snr_ok, "body {body}: snr {} span {}", e.snr_db, e.span_mm);
         }
     }
 }

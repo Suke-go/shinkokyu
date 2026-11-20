@@ -5,7 +5,7 @@ body {
   box-sizing: border-box;
   padding: 5vmin;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto auto auto;
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto auto auto;
   justify-items: center;
   align-items: center;
   gap: 2vmin;
@@ -16,18 +16,25 @@ body {
   user-select: none;
 }
 
-.hr, .br { display: flex; align-items: center; gap: .3em; line-height: 1; }
-.hr { font-size: clamp(56px, 24vmin, 240px); font-weight: 300; }
-.br { font-size: clamp(18px, 6vmin, 60px); color: var(--mid); }
-.hr svg { width: .34em; fill: currentColor; animation: beat 1s ease-in-out infinite; }
-.br svg { width: 1em; fill: none; stroke: currentColor; stroke-width: 2.5; stroke-linecap: round; }
+/* signal quality, like reception bars: something reflects / a person who breathes / breaths cut steadily */
+.bars { justify-self: end; display: flex; align-items: flex-end; gap: 3px; height: clamp(14px, 4vmin, 28px); }
+.bars i { width: clamp(4px, 1.1vmin, 8px); border-radius: 2px; background: var(--soft); }
+.bars i:nth-child(1) { height: 40%; }
+.bars i:nth-child(2) { height: 70%; }
+.bars i:nth-child(3) { height: 100%; }
+body:is([data-quality="1"], [data-quality="2"], [data-quality="3"]) .bars i:nth-child(1),
+body:is([data-quality="2"], [data-quality="3"]) .bars i:nth-child(2),
+body[data-quality="3"] .bars i:nth-child(3) { background: var(--ink); }
 
-/* an estimate that should not be trusted is shown, but pale and with a still heart */
-.weak { color: var(--soft); }
-.weak svg, body:not([data-state="streaming"]) .hr svg { animation: none; }
-body:not([data-state="streaming"]) :is(.hr, .br) { color: var(--soft); }
+/* breathing is the main reading, heart rate the side one */
+.big, .small { display: flex; align-items: center; gap: .3em; line-height: 1; }
+.big { font-size: clamp(56px, 24vmin, 240px); font-weight: 300; }
+.small { font-size: clamp(18px, 6vmin, 60px); color: var(--mid); }
+.big svg { width: .7em; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
+.small svg { width: .8em; fill: currentColor; }
 
-@keyframes beat { 0%, 100% { transform: scale(1); } 15% { transform: scale(1.2); } 30% { transform: scale(1); } }
+/* a reading that should not be trusted is shown, but pale */
+.weak, body:not([data-state="streaming"]) :is(.big, .small) { color: var(--soft); }
 
 canvas { width: 100%; height: 100%; }
 /* what the radar is pointed at: near on the left, far on the right, darker = stronger reflection */
@@ -37,7 +44,7 @@ nav { display: flex; align-items: center; gap: 7vmin; }
 button { border: 0; cursor: pointer; }
 button:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
 
-/* the ring fills while the first window is collected, then stays full while measuring */
+/* the ring fills while the first data is collected, then stays full while measuring */
 #toggle {
   --p: 0;
   position: relative;

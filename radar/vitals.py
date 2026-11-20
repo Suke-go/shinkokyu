@@ -32,9 +32,10 @@ HEADER = struct.Struct("<8I")  # fields after the magic word
 TLV_AZIMUTH_STATIC_HEATMAP = 4
 N_ANT = 4
 # A person in the beam: a reflection well above the noise floor (a body gives 28-39 dB, an empty beam
-# 7-13 dB) that also moves with breathing (millimetres; a chair or a wall stays within 0.2 mm).
+# 7-13 dB) that also moves with breathing (a chest several mm, a back 0.5-2 mm; a chair or a wall
+# stays within 0.2 mm).
 SNR_MIN_DB = 26
-SPAN_MIN_MM = 0.5
+SPAN_MIN_MM = 0.3
 
 CONFIG = [l.strip() for l in (HERE / "chirp.cfg").read_text().splitlines() if l.strip() and not l.startswith("%")]
 _profile = next(l for l in CONFIG if l.startswith("profileCfg")).split()
@@ -238,7 +239,6 @@ def analyze(H, rmin, rmax):
     # Heart rate from velocity: breathing is far larger than the heartbeat in displacement.
     hr_f, hr_q, hr_sig, hr_spec = band_peak(dphi * mm * FRAME_HZ, 0.8, 2.5)
     return {
-        "present": bool(snr_db >= SNR_MIN_DB and np.ptp(br_sig) >= SPAN_MIN_MM),
         "snr_db": float(snr_db),
         "range_m": float(rng[bins] @ motion[bins] / motion[bins].sum()),
         "span_mm": float(np.ptp(br_sig)),
@@ -246,7 +246,6 @@ def analyze(H, rmin, rmax):
         "br_q": float(br_q),
         "hr_bpm": float(hr_f * 60),
         "hr_q": float(hr_q),
-        "hr_harmonic": any(abs(hr_f - k * br_f) < 0.05 for k in range(2, 7)),
         "disp_mm": disp_mm,
         "br_sig": br_sig,
         "hr_sig": hr_sig,
@@ -258,14 +257,14 @@ def describe(r):
     """One line for a row of the .hr.jsonl."""
     if not r["present"]:
         what = "nothing in the beam" if r["snr_db"] < SNR_MIN_DB else "something in the beam, but it does not breathe"
-        return f"no person: {what} (reflection {r['snr_db']:.0f} dB over the floor, motion {r['span_mm']:.2f} mm). Re-aim the radar"
+        return f"no person: {what} (reflection {r['snr_db']:.0f} dB over the floor, motion {r['br_span_mm']:.2f} mm). Re-aim the radar"
     if r["br_period_s"] is None:
         breathing = "breathing: no regular cycle yet"
     else:
         last = " ".join(f"{b['period_s']:.1f}" for b in r["breaths"][-6:])
         breathing = f"breathing {r['br_period_s']:.1f} s a breath ({r['br_bpm']:.1f}/min), {r['br_depth_mm']:.1f} mm deep, regularity {r['br_q']:.2f}, last breaths [{last}] s"
     heart = "heart: -" if r["hr_bpm"] is None else f"heart {r['hr_bpm']:.0f} bpm" + ("" if r["hr_q"] >= 0.35 else " (unreliable)")
-    return f"{r['br_range_m'] or r['range_m']:.2f} m ({r['snr_db']:.0f} dB) | {breathing} | {heart}"
+    return f"quality {r['quality']}/3 | {r['br_range_m'] or r['range_m']:.2f} m ({r['snr_db']:.0f} dB) | {breathing} | {heart}"
 
 
 def save_plot(r, path):
@@ -374,6 +373,10 @@ def main():
                                     row = {"t": anchor + fnums[-1] * FRAME_MS, "window": args.window}
                                     row.update({k: v for k, v in result.items() if not isinstance(v, (np.ndarray, tuple))})
                                     row.update({k: v for k, v in b.items() if k.startswith(("br_", "hr_"))})  # breathing and heart rate from the one chest track
+                                    row["present"] = bool(row["snr_db"] >= SNR_MIN_DB and row["br_span_mm"] >= SPAN_MIN_MM)
+                                    # 0 nothing reflects, 1 something does, 2 a person who breathes, 3 breaths cut steadily
+                                    steady = len(b["breaths"]) >= 2 and b["br_q"] >= 0.3 and b["br_moving"] <= 0.2
+                                    row["quality"] = 0 if row["snr_db"] < SNR_MIN_DB else 1 if not row["present"] else 3 if steady else 2
                                     # each breath that ended in the last 30 s: when it ended, how long it took, how deep it was
                                     row["breaths"] = [{"t": row["t"] - ago * 1000, "period_s": p, "depth_mm": d} for ago, p, d in b["breaths"]]
                                     hr_log.write(json.dumps(row) + "\n")

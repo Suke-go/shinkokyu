@@ -40,13 +40,12 @@ assert abs(r["range_m"] - 0.6) < v.RANGE_RES, r["range_m"]
 assert abs(r["br_bpm"] - 18) < 1.5, r["br_bpm"]
 assert abs(r["hr_bpm"] - 69) < 3, r["hr_bpm"]
 assert r["hr_q"] > 0.5, r["hr_q"]
-assert r["present"] and r["snr_db"] > v.SNR_MIN_DB, r["snr_db"]
+assert r["snr_db"] > v.SNR_MIN_DB, r["snr_db"]
 H[:, b, :] -= 2000 * np.exp(1j * 4 * np.pi * d / v.WAVELENGTH)[:, None]  # nobody there
-r = v.analyze(H, 0.3, 1.5)
-assert not r["present"] and r["snr_db"] < 15, r["snr_db"]
+assert v.analyze(H, 0.3, 1.5)["snr_db"] < 15
 H[:, b, :] += 2000  # a chair: strong, but it does not breathe
 r = v.analyze(H, 0.3, 1.5)
-assert not r["present"] and r["snr_db"] > v.SNR_MIN_DB and r["span_mm"] < 0.2, (r["snr_db"], r["span_mm"])
+assert r["snr_db"] > v.SNR_MIN_DB and r["span_mm"] < 0.2, (r["snr_db"], r["span_mm"])
 
 # --- breathing: 15 a minute (3 mm) for 60 s, then 7.5 a minute (6 mm); a reflector 3 bins further is stronger but only wanders
 import breathing as br
@@ -70,6 +69,23 @@ assert all(abs(p - 4.0) < 0.4 for _, p, _ in r["breaths"]), r["breaths"]
 assert abs(r["hr_bpm"] - 69) < 3 and r["hr_q"] > 0.35, (r["hr_bpm"], r["hr_q"])  # the 0.1 mm heartbeat, from the same track
 r = seen[110.0]
 assert abs(r["br_period_s"] - 8.0) < 0.6 and abs(r["br_depth_mm"] - 6.0) < 1.2, (r["br_period_s"], r["br_depth_mm"])
+
+# --- from behind: a back moving 1 mm (15 a minute) in front of a chair back that reflects 4x as strongly, same bin
+import breathing as br2
+
+t = np.arange(int(60 * v.FRAME_HZ)) / v.FRAME_HZ
+d = 0.5e-3 * np.sin(2 * np.pi * 0.25 * t)
+shape = (len(t), v.N_SAMPLES, v.N_ANT)
+back = 5 * (rng.standard_normal(shape) + 1j * rng.standard_normal(shape))
+back[:, b, :] += 500 * np.exp(1j * 4 * np.pi * d / v.WAVELENGTH)[:, None] + 2000 * np.exp(0.7j)
+tr = br2.Breathing(v.FRAME_HZ, v.WAVELENGTH / (4 * np.pi) * 1e3, np.arange(v.N_SAMPLES) * v.RANGE_RES, 0.3, 1.5)
+for end in range(int(20 * v.FRAME_HZ), len(t) + 1, hop):
+    r = tr.update(back[max(end - look, 0) : end], hop)
+assert abs(r["br_period_s"] - 4.0) < 0.3 and abs(r["br_depth_mm"] - 1.0) < 0.2, (r["br_period_s"], r["br_depth_mm"])
+z = back[:, b, 0]
+assert abs(np.ptp(np.unwrap(np.angle(z))) * v.WAVELENGTH / (4 * np.pi) * 1e3 - 1.0) > 0.5  # without the subtraction the swing is far off
+z0 = 300 * np.exp(1j * 4 * np.pi * 3e-3 * np.sin(2 * np.pi * 0.25 * t[:1200]) / v.WAVELENGTH) + 20  # chest from the front: static part weaker
+assert br2.remove_static(z0) is z0  # left alone
 
 # --- breathing first: a heart-band peak on a breathing harmonic is not a heart rate
 fs = v.FRAME_HZ
