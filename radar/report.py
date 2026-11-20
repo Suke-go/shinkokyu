@@ -22,7 +22,7 @@ import numpy as np
 from breathing import SELECT_S, Breathing, cut_breaths
 
 N_ANT = 4
-Q_MIN, SNR_MIN_DB, SPAN_MIN_MM = 0.35, 26, 0.5  # README: when an estimate is usable
+Q_MIN, SNR_MIN_DB, SPAN_MIN_MM = 0.35, 18, 0.3  # README: when an estimate is usable
 RMAX_M = 1.5
 _fonts = {f.name for f in matplotlib.font_manager.fontManager.ttflist}
 plt.rcParams["font.family"] = [f for f in ("Yu Gothic", "Hiragino Sans", "Noto Sans CJK JP") if f in _fonts] + ["sans-serif"]

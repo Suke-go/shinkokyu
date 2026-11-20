@@ -203,15 +203,15 @@ pub fn measure(opts: &Options, stop: &AtomicBool, emit: &dyn Fn(&str, Value)) ->
 
 /// Signal quality, as shown by the bars on the screen, and what it rests on:
 /// 0 "empty" nothing reflects, 1 "static" something does but it does not breathe, 2 a person who breathes but
-/// the breathing is not steady yet ("moving" the body is shifting, "few" under two breaths cut in the last
-/// 30 s, "irregular" the wave does not repeat), 3 "steady" (the state to start an experiment in).
+/// cannot be followed yet ("moving" the body is shifting, "few" under two breaths cut in the last 30 s),
+/// 3 "steady" (the state to start an experiment in). How regularly the wave repeats is not asked for:
+/// resting breaths vary in length by seconds and are cut all the same.
 fn quality(snr_db: f64, present: bool, b: &breathing::Out) -> (u8, &'static str) {
     match (snr_db >= vitals::SNR_MIN_DB, present) {
         (false, _) => (0, "empty"),
         (true, false) => (1, "static"),
         (true, true) if b.br_moving > 0.2 => (2, "moving"),
         (true, true) if b.breaths.len() < 2 => (2, "few"),
-        (true, true) if b.br_q < 0.3 => (2, "irregular"),
         (true, true) => (3, "steady"),
     }
 }
@@ -339,7 +339,7 @@ mod tests {
         assert_eq!(super::quality(36.0, true, &steady), (3, "steady"));
         assert_eq!(super::quality(36.0, true, &Out { br_moving: 0.5, ..Default::default() }), (2, "moving"));
         assert_eq!(super::quality(36.0, true, &Out::default()), (2, "few"));
-        assert_eq!(super::quality(36.0, true, &Out { br_q: 0.1, breaths: steady.breaths.clone(), ..Default::default() }), (2, "irregular"));
+        assert_eq!(super::quality(36.0, true, &Out { br_q: 0.1, breaths: steady.breaths.clone(), ..Default::default() }), (3, "steady"));
     }
 
     #[test]

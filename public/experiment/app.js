@@ -57,7 +57,6 @@ const WHY = {
   static: "呼吸の動きが見えていません。実験者に知らせてください",
   moving: "体が動いています。楽な姿勢で、じっとしていてください",
   few: "そのまま、普通に呼吸していてください",
-  irregular: "そのまま、普通に呼吸していてください",
   steady: "測定できています",
 };
 let recording = false; // the radar's estimates are being logged: from the start of the baseline to the end of the task
@@ -300,9 +299,11 @@ $("start-btn").addEventListener("click", async () => {
   if (seconds > 0) { // the baseline lasts exactly this long; how steady the breathing was is recorded, not waited for
     show("s-base");
     log("baseline_start", null, JSON.stringify({ seconds }));
+    let skipped = false, done = 0;
+    $("base-skip").onclick = () => { skipped = true; };
     for (const t0 = pageNow(); ;) {
-      const done = (pageNow() - t0) / 1000;
-      if (done >= seconds) break;
+      done = (pageNow() - t0) / 1000;
+      if (done >= seconds || skipped) break;
       $("base-bar").value = done / seconds;
       const left = Math.ceil(seconds - done);
       $("base-left").textContent = `あと ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
@@ -310,7 +311,7 @@ $("start-btn").addEventListener("click", async () => {
     }
     const periods = base.breaths.map((b) => b.period_s).sort((a, b) => a - b);
     log("baseline_end", null, JSON.stringify({
-      seconds, steady_share: base.rows ? base.steady / base.rows : null, breaths: periods.length,
+      seconds: Math.min(done, seconds), skipped, steady_share: base.rows ? base.steady / base.rows : null, breaths: periods.length,
       period: median(periods), period_iqr: periods.length > 1 ? periods[Math.floor((periods.length - 1) * 0.75)] - periods[Math.floor((periods.length - 1) * 0.25)] : null,
       depth: median(base.breaths.map((b) => b.depth_mm)), hr: median(base.hearts),
     }));
@@ -324,6 +325,7 @@ $("start-btn").addEventListener("click", async () => {
   updateCount();
   snapshot("session_start");
   saveLocalMeta({ startedAt: pageNow() });
+  if (exp.limitMin > 0) setTimeout(() => finish(true), exp.limitMin * 60000); // the task ends by itself after this long
   ta.focus();
 });
 
@@ -340,7 +342,13 @@ for (const t of ["copy", "cut", "contextmenu", "selectstart", "dragstart"]) {
 $("finish-btn").addEventListener("click", () => { $("confirm").hidden = false; $("back-btn").focus(); });
 $("back-btn").addEventListener("click", () => { $("confirm").hidden = true; ta.focus(); });
 
-$("end-btn").addEventListener("click", async () => {
+$("end-btn").addEventListener("click", () => finish(false));
+async function finish(timeUp) {
+  if (!active) return; // already finishing: the limit and the button can both fire
+  if (timeUp) {
+    $("confirm-h").textContent = "時間になりました";
+    $("confirm").hidden = false;
+  }
   const line = $("end-line");
   $("end-btn").disabled = $("back-btn").disabled = true;
   const finalText = ta.value;
@@ -375,7 +383,7 @@ $("end-btn").addEventListener("click", async () => {
     await download();
   }
   show("s-done");
-});
+}
 
 async function download() {
   try {

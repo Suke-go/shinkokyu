@@ -31,7 +31,6 @@ const WHY: Record<string, string> = {
   static: "物は映っていますが、呼吸の動きがありません",
   moving: "呼吸が見えています。体が動いています",
   few: "呼吸が見えています。あと少しそのままで",
-  irregular: "呼吸が見えています。波がまだ不規則です",
   steady: "安定しています。課題を始められます",
 };
 
@@ -148,7 +147,7 @@ listen<Seen>("seen", ({ payload }) => {
   seen = payload.db;
   drawSeen();
   // before the first estimate, the reflection alone gives the first bar
-  if (!estimating) Math.max(...seen) >= 26 ? setQuality(1, "") : setQuality(0, "empty");
+  if (!estimating) Math.max(...seen) >= 18 ? setQuality(1, "") : setQuality(0, "empty");
 });
 
 listen<Live>("live", ({ payload: e }) => {

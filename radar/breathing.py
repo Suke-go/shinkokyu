@@ -32,7 +32,7 @@ JUMP_MM_S = 25.0  # a breathing chest stays under this
 MOVE_MM_S = 12.0
 MIN_DEPTH_MM = 0.3  # shallower than this is not a breath
 SELECT_S = 30.0  # the chest is looked for in this much data
-MIN_DB = 20  # bins reflecting less than this over the noise floor are not considered
+MIN_DB = 20  # bins reflecting less than this over the noise floor are not followed (15 lets far, weak bins in)
 HEART_S = 20.0  # heart rate is estimated over this much of the track
 HEART_HZ = (0.8, 2.5)  # 48 to 150 beats a minute
 

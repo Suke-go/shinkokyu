@@ -16,7 +16,7 @@ const MOVE_MM_S: f64 = 12.0; // ... and under this once smoothed over half a sec
 const MIN_DEPTH_MM: f64 = 0.3; // shallower than this is not a breath
 pub const SELECT_S: f64 = 30.0; // the chest is looked for in this much data
 const KEEP_S: f64 = 60.0; // length of the continuous track
-const MIN_DB: f64 = 20.0; // bins reflecting less than this over the noise floor are not considered
+const MIN_DB: f64 = 20.0; // bins reflecting less than this over the noise floor are not followed (15 lets far, weak bins in)
 const HEART_S: f64 = 20.0;
 const HEART_HZ: (f64, f64) = (0.8, 2.5);
 

@@ -33,7 +33,7 @@ URL: 実験 `http://localhost:8787/experiment/` / ダッシュボード `http://
 |---|---|---|---|
 | GET | `/api/time` | – | `{ "t1": <server recv UTC ms>, "t2": <server send UTC ms> }` ※ UTC ms = `Date.now() + sntpOffset`。t1 はリクエスト受信直後、t2 はレスポンス書き込み直前に取得。`performance.now()` ベースで小数ms可 |
 | GET | `/api/server-clock` | – | `{ "sntp": { "ok": bool, "offset": ms, "delay": ms, "server": "...", "at": UTC ms } }` |
-| GET | `/api/experiments/:expId` | – | `{ "expId", "title", "lang", "text" }` 404 if unknown |
+| GET | `/api/experiments/:expId` | – | `{ "expId", "title", "lang", "text", "limitMin"? }` 404 if unknown。`limitMin` があれば、課題は `session_start` からその分数で自動的に終了する（終了確認なしで送信に進む） |
 | POST | `/api/sessions` | `{ "expId", "participantId" }` | `{ "sessionId" }` sessionId = `${expId}_${participantId}_${YYYYMMDD-HHmmss}` (英数と`-_`のみに正規化) |
 | POST | `/api/sessions/:id/sync` | 同期結果オブジェクト (§3) | `{ "ok": true }` meta.syncs 配列に追記 |
 | POST | `/api/sessions/:id/events` | `{ "seq": <batch番号>, "events": [ ... ] }` | `{ "ok": true, "seq" }` 同じ seq の再送は無視 (冪等) |
@@ -90,7 +90,7 @@ export function makeOffsetFn(syncs) // syncs=meta.syncs → (tLocal)=>tUtc。sta
 - `t`: **ローカル時刻** = `performance.timeOrigin + e.timeStamp`（小数ms）。UTC 変換は解析側で `t + offset`（§3）。Date.now() はイベント毎に使わない。
 - `seq`: セッション内の通し番号（0 始まり）。
 - `type`: `keydown` `keyup` `input` `compositionstart` `compositionupdate` `compositionend` `paste` `focus` `blur` `snapshot` `session_start` `session_end` `vital` `breath` `baseline_start` `baseline_end`
-- `vital` / `breath`: デスクトップアプリ（§5.5）内でのみ発生。`vital` はレーダーの 2 秒毎の推定で、`data` は JSON 文字列 `{"quality","present","snr","range","br","period","depth","regular","moving","hr","q"}`（`quality` 0〜3: 0 何も映っていない / 1 何かが映っている / 2 呼吸している人 / 3 呼吸が安定して区切れている。解析には 3 を使う）。`breath` は 1 呼吸が終わるたびに 1 件で、`t` はその呼吸の終わった時刻、`data` は `{"period","depth"}`（秒, mm）。`baseline_start` / `baseline_end` は、課題の前に測る安静時の呼吸（長さは `localStorage.baselineMinutes`、既定 3 分、0 で省く）の始まりと終わりで、`session_start` より前に入る。`baseline_end` の `data` は `{"seconds","steady_share","breaths","period","period_iqr","depth","hr"}`。安静時の計測は決めた長さちょうどで終わり、`quality` が 3 だった割合（`steady_share`）は記録するだけで、長さには影響させない。どちらも `t` はこのページのローカル時刻。metrics.js は無視する。
+- `vital` / `breath`: デスクトップアプリ（§5.5）内でのみ発生。`vital` はレーダーの 2 秒毎の推定で、`data` は JSON 文字列 `{"quality","present","snr","range","br","period","depth","regular","moving","hr","q"}`（`quality` 0〜3: 0 何も映っていない / 1 何かが映っている / 2 呼吸している人 / 3 呼吸が安定して区切れている。解析には 3 を使う）。`breath` は 1 呼吸が終わるたびに 1 件で、`t` はその呼吸の終わった時刻、`data` は `{"period","depth"}`（秒, mm）。`baseline_start` / `baseline_end` は、課題の前に測る安静時の呼吸（長さは `localStorage.baselineMinutes`、既定 3 分、0 で省く）の始まりと終わりで、`session_start` より前に入る。`baseline_end` の `data` は `{"seconds","skipped","steady_share","breaths","period","period_iqr","depth","hr"}`。安静時の画面の右下の隅（表示なし）を押すと、その場で打ち切って課題に進む（実験者の動作確認用）。安静時の計測は決めた長さちょうどで終わり、`quality` が 3 だった割合（`steady_share`）は記録するだけで、長さには影響させない。どちらも `t` はこのページのローカル時刻。metrics.js は無視する。
 - `key`,`code`,`repeat`: keydown/keyup のみ。他は null。
 - `blocked`: keydown のみ。ショートカット抑止で preventDefault した場合 true（それ以外は欠落）。
 - `isComposing`: KeyboardEvent/InputEvent の値。他は false。
@@ -166,7 +166,7 @@ offsetFn(tLocal) → UTC ms（§3 の補正）。
 - `vitals.py`: 単独記録。下記の「時刻」のとおり自分で同期する。
 
 - 機材: PTM RFR79ITR34-30U（TI IWR1843、mmWave SDK 3.5 標準デモ FW、FT4232H: チャネル A = CLI 115200bps / B = データ 921600bps）。77.0–80.82GHz、1TX/4RX、64 距離ビン（約 4.8cm）、40 フレーム/秒（位相が折り返さない上限 38mm/s）。1 フレーム = 0.75ms 間隔の 16 チャープ（12ms）で、その和（ゼロドップラー）を使うため約 8cm/s より速い動き（打鍵中の手・腕）は打ち消される。
-- 取得: 標準デモの range-azimuth heatmap TLV（ゼロドップラーの距離ビン複素値）。手順は `radar/README.md`「測定の仕組み」と `radar/breathing.py` の冒頭: 動かない反射の除去（円フィット）→ 距離ビン毎の位相差 = 速度 → 飛びの切り落とし → ガウシアン平滑化と基線除去 = 呼吸の波形 → いちばん規則的な距離ビンを胸とする → 上向きゼロ交差で 1 呼吸に区切る → 残りから心拍数（呼吸の倍音は心拍にしない）。呼吸は直近 30 秒、心拍は直近 20 秒を見て、記録は 2 秒毎。人が映っているか（`present`）は、測定ビンの反射が雑音床（0.3m 以遠のビンの振幅の 20 パーセンタイル）より 26dB 以上強く、かつ呼吸波形の振れが 0.3mm 以上であること。アプリは 0.5 秒毎に距離ビン毎の反射（雑音床比 dB）を `seen` イベントで画面に出す。記録の様子は `radar/report.py` で図と要約にできる。
+- 取得: 標準デモの range-azimuth heatmap TLV（ゼロドップラーの距離ビン複素値）。手順は `radar/README.md`「測定の仕組み」と `radar/breathing.py` の冒頭: 動かない反射の除去（円フィット）→ 距離ビン毎の位相差 = 速度 → 飛びの切り落とし → ガウシアン平滑化と基線除去 = 呼吸の波形 → いちばん規則的な距離ビンを胸とする → 上向きゼロ交差で 1 呼吸に区切る → 残りから心拍数（呼吸の倍音は心拍にしない）。呼吸は直近 30 秒、心拍は直近 20 秒を見て、記録は 2 秒毎。人が映っているか（`present`）は、測定ビンの反射が雑音床（0.3m 以遠のビンの振幅の 20 パーセンタイル）より 18dB 以上強く（胸 28〜39dB、背中 19〜29dB、何も無いと 7〜13dB）、かつ呼吸波形の振れが 0.3mm 以上であること。アプリは 0.5 秒毎に距離ビン毎の反射（雑音床比 dB）を `seen` イベントで画面に出す。記録の様子は `radar/report.py` で図と要約にできる。
 - 時刻（`vitals.py`）: §3.B と同じ方式で開始時・終了時に同期し、`.json` の `syncs` に §3 と同形（+ `source`）で保存（`makeOffsetFn` がそのまま使える）。同期先は backend.js と同じ選び方: `/api/time` が応答すれば server、無ければ Supabase `rpc/server_time`。突き合わせるタイピング画面と同じ同期先にする（`--backend`）。**記録時刻は生のローカル ms**、補正は解析時（§3 と同じ方針）。タイピングのセッションとは UTC の重なりで突き合わせる。
 - ファイル `radar_<sessionId または UTC stamp>.*`（アプリ: ドキュメント/shinkokyu-radar、`vitals.py`: `radar/captures`）: `.json`（設定。アプリは sessionId、`vitals.py` は syncs）/ `.bin`（全フレーム。固定長レコード `t` float64 到着ローカル ms, `fnum` uint32, `iq` int16[64][4][imag,real]）/ `.hr.jsonl`（`{t, window, quality, present, snr_db, range_m, span_mm, br_period_s, br_bpm, br_q, br_depth_mm, br_span_mm, br_range_m, br_moving, hr_bpm, hr_q, hr_peak_bpm, breaths}`。`t` は推定の時刻）/ `.png`（`vitals.py` のみ。最後の窓の波形）。
 - フレーム時刻 = レーダーのフレーム番号 × 25ms + 最小遅延の到着時刻で決めた基準。残差は約 15–20ms の遅れ（フレーム処理 + UART）と水晶ドリフト。

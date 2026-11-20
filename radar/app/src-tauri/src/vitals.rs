@@ -4,10 +4,10 @@ use rustfft::{num_complex::Complex64, FftPlanner};
 use serde::Serialize;
 use std::f64::consts::PI;
 
-/// A person in the beam: a reflection well above the noise floor (a body gives 28-39 dB, an empty
+/// A person in the beam: a reflection well above the noise floor (a chest gives 28-39 dB, a back 19-29, an empty
 /// beam 7-13 dB) that also moves with breathing (a chest several mm, a back 0.5-2 mm; a chair or a wall
 /// stays within 0.2 mm). lib.rs combines the two.
-pub const SNR_MIN_DB: f64 = 26.0;
+pub const SNR_MIN_DB: f64 = 18.0;
 pub const SPAN_MIN_MM: f64 = 0.3;
 
 /// 20th percentile of the per-bin reflection amplitude from `first` on: the level of bins with nothing in them.
