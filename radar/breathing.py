@@ -75,18 +75,19 @@ def moving(vel, fs):
 def cut_breaths(x, fs, shifting=None):
     """Breathing wave -> [(start index, end index, depth mm)], one per breath.
 
-    A breath runs from one upward zero crossing to the next. In between, the wave must dip below a
-    threshold (about a quarter of the size of the recent breathing, taken from the median so that one large
-    movement does not raise it), so ripples around zero do not count. Stretches where `shifting` is
-    True for more than a tenth of their length are dropped.
+    A breath runs from one upward zero crossing to the next. In between, the wave must first rise above a
+    threshold and then dip below minus that threshold (about a quarter of the size of the recent
+    breathing, taken from the median so that one large movement does not raise it). Ripples around zero
+    lack one or the other and do not end a breath: the pause after a slow deep breath out is such a ripple.
+    Stretches where `shifting` is True for more than a tenth of their length are dropped.
     """
     block, span = int(5 * fs), int(15 * fs)
     out, armed, start, lo, hi = [], False, None, 0.0, 0.0
     for b0 in range(0, len(x), block):
         h = max(0.35 * np.median(np.abs(x[max(b0 + block - span, 0) : b0 + block])), MIN_DEPTH_MM / 2)
         for i in range(max(b0, 1), min(b0 + block, len(x))):
-            armed = armed or x[i] < -h
             lo, hi = min(lo, x[i]), max(hi, x[i])
+            armed = armed or (x[i] < -h and (hi > h or start is None))  # the first breath has no known start
             if armed and x[i - 1] <= 0 < x[i]:
                 still = shifting is None or shifting[start:i].mean() <= 0.1 if start is not None else False
                 if start is not None and MIN_S <= (i - start) / fs <= MAX_S and hi - lo >= MIN_DEPTH_MM and still:
