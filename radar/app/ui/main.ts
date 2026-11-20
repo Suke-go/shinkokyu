@@ -2,7 +2,6 @@ type Status = { state: string; text?: string; progress?: number };
 type Live = {
   quality: number; // 0-3: the bars
   quality_why: string; // what the quality rests on: see WHY
-  br_bpm: number | null;
   hr_bpm: number | null;
   hr_q: number;
   wave: number[]; // the tracker's breathing wave of the last 30 s; only its length is used here
@@ -37,7 +36,7 @@ const WHY: Record<string, string> = {
 const FRAME_HZ = 40, SPAN_MS = 30000; // radar frames a second; how much of the past the line shows
 
 const el = (id: string) => document.getElementById(id)!;
-const hr = el("hr"), br = el("br"), note = el("note"), why = el("why"), toggle = el("toggle");
+const hr = el("hr"), br = el("br"), per = el("per"), note = el("note"), why = el("why"), toggle = el("toggle");
 const canvas = el("trace") as HTMLCanvasElement, strip = el("seen") as HTMLCanvasElement;
 const setState = (s: string) => { document.body.dataset.state = s; };
 const setQuality = (q: number, reason: string) => {
@@ -154,6 +153,7 @@ function reset() {
   toggle.style.removeProperty("--p");
   show(br, null, true);
   show(hr, null, true);
+  per.textContent = "";
   points = [];
   marks = [];
   seen = [];
@@ -212,8 +212,13 @@ listen<Live>("live", ({ payload: e }) => {
   if (document.body.dataset.state !== "stopping") setState("streaming");
   estimating = true;
   setQuality(e.quality, e.quality_why);
-  // without a person there are no numbers at all, rather than numbers made from noise
-  show(br, e.quality >= 2 ? e.br_bpm : null, e.quality >= 3);
+  // The breathing number is the breaths marked on the line: the median length of those cut in the last 30 s,
+  // as breaths a minute and as seconds a breath. Without a person there are no numbers at all.
+  const cuts = e.cuts.slice(e.cuts.length % 2); // pairs of start, end; a breath that began before the wave has only its end
+  const lengths = cuts.flatMap((c, i) => (i % 2 ? [(c - cuts[i - 1]) / FRAME_HZ] : [])).sort((a, b) => a - b);
+  const breath = e.quality >= 2 && lengths.length ? (lengths[(lengths.length - 1) >> 1] + lengths[lengths.length >> 1]) / 2 : null;
+  show(br, breath && 60 / breath, e.quality >= 3);
+  per.textContent = breath ? `1 呼吸 ${breath.toFixed(1)} 秒` : "";
   show(hr, e.quality >= 2 ? e.hr_bpm : null, e.hr_q >= 0.35);
   const now = performance.now();
   marks = e.quality >= 2 ? e.cuts.map((c) => now - ((e.wave.length - c) * 1000) / FRAME_HZ) : [];

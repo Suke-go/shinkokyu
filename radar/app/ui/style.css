@@ -41,6 +41,9 @@ body[data-quality="3"] #why { color: var(--ink); }
 .small { font-size: clamp(18px, 6vmin, 60px); color: var(--mid); }
 .big svg { width: .7em; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
 .small svg { width: .8em; fill: currentColor; }
+/* what the number counts; under it, the length of one breath */
+.unit { font-size: .14em; font-weight: 400; line-height: 1.5; color: var(--mid); white-space: nowrap; }
+.small .unit { font-size: .45em; }
 
 /* a reading that should not be trusted is shown, but pale */
 .weak, body:not([data-state="streaming"]) :is(.big, .small) { color: var(--soft); }

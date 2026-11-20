@@ -20,10 +20,12 @@
   <div class="big" id="br" aria-label="呼吸数（毎分）">
     <svg viewBox="0 0 48 24" aria-hidden="true"><path d="M2 12c5-12 9-12 14 0s9 12 14 0 9-12 14 0"/></svg>
     <output>–</output>
+    <span class="unit">回/分<br><span id="per"></span></span>
   </div>
   <div class="small" id="hr" aria-label="心拍数（毎分）">
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s-7.5-4.6-9.6-9.2C.9 8.4 2.6 4.5 6.3 4.5c2.2 0 3.9 1.2 5.7 3.4 1.8-2.2 3.5-3.4 5.7-3.4 3.7 0 5.4 3.9 3.9 7.3C19.5 16.4 12 21 12 21z"/></svg>
     <output>–</output>
+    <span class="unit">拍/分</span>
   </div>
   <canvas id="trace" aria-label="呼吸の波形（直近30秒。縦の線は1呼吸の区切り）"></canvas>
   <canvas id="seen" aria-label="レーダーに映っているもの（左が近く、右が遠く。濃いほど強い反射）"></canvas>
