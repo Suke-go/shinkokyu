@@ -1,4 +1,7 @@
-"""Breathing cycles from the radar's range-bin phases: when each breath happened, how long it took, how deep it was.
+"""Breathing cycles and heart rate from one track of the chest's motion.
+
+The chest's displacement is split by time scale: what a wide Gaussian follows is posture, what a narrow
+Gaussian follows on top of that is breathing, and what is left over holds the heartbeat.
 
 Steps (the usual ones for FMCW vital signs, e.g. Alizadeh et al., IEEE Access 2019; TI's vital signs lab):
   1. Chest velocity per range bin, from the phase step between frames summed over the antennas.
@@ -9,6 +12,9 @@ Steps (the usual ones for FMCW vital signs, e.g. Alizadeh et al., IEEE Access 20
      with it. The strongest reflection is often not the chest.
   5. The wave is cut into breaths at its upward zero crossings. A stretch in which the body itself was
      shifting is not counted as a breath.
+  6. Heart rate: the spectrum of what the breathing smoother left over (as velocity), scored together with
+     its second harmonic, which breathing harmonics rarely match. A peak near the previous estimate is
+     preferred if it is at least half as strong as the strongest: a heart rate does not jump 20 beats in 2 s.
 """
 from collections import deque
 
@@ -23,6 +29,8 @@ MOVE_MM_S = 12.0
 MIN_DEPTH_MM = 0.3  # shallower than this is not a breath
 SELECT_S = 30.0  # the chest is looked for in this much data
 MIN_DB = 20  # bins reflecting less than this over the noise floor are not considered
+HEART_S = 20.0  # heart rate is estimated over this much of the track
+HEART_HZ = (0.8, 2.5)  # 48 to 150 beats a minute
 
 
 def gauss(x, sigma_s, fs):
@@ -85,6 +93,31 @@ def cut_breaths(x, fs, shifting=None):
     return out
 
 
+def heart_rate(vel, fs, prev=None):
+    """Chest velocity [mm/s] -> (beats/min, share of the band's power within 0.1 Hz of that peak,
+    beats/min of the strongest peak before `prev` was taken into account)."""
+    d = np.cumsum(np.clip(vel, -JUMP_MM_S, JUMP_MM_S)) / fs
+    x = np.gradient(d - gauss(d, SMOOTH_S, fs)) * fs
+    n = len(x)
+    i = np.arange(n)
+    x = x - np.polyval(np.polyfit(i, x, 1), i)
+    nfft = 1 << int(np.ceil(np.log2(n * 8)))
+    f = np.fft.rfftfreq(nfft, 1 / fs)
+    s = np.abs(np.fft.rfft(x * np.hanning(n), nfft)) ** 2
+    band = np.flatnonzero((f >= HEART_HZ[0]) & (f <= HEART_HZ[1]))
+    score = s[band] + s[2 * band]
+    pk = np.flatnonzero((score > np.r_[score[1:], 0]) & (score >= np.r_[0, score[:-1]]))
+    if not len(pk):
+        pk = np.array([score.argmax()])
+    top = k = int(pk[score[pk].argmax()])
+    fb = f[band]
+    if prev is not None:
+        near = [j for j in pk if abs(fb[j] * 60 - prev) <= 10 and score[j] >= 0.5 * score[top]]
+        if near:
+            k = int(max(near, key=lambda j: score[j]))
+    return float(fb[k] * 60), float(s[band][np.abs(fb - fb[k]) <= 0.1].sum() / s[band].sum()), float(fb[top] * 60)
+
+
 class Breathing:
     """Follows the chest from update to update and keeps one continuous breathing wave."""
 
@@ -92,10 +125,11 @@ class Breathing:
         self.fs, self.mm, self.rng, self.rmin, self.rmax = fs, mm_per_rad, rng, rmin, rmax
         self.vel = deque(maxlen=int(keep_s * fs) if keep_s else None)  # chest velocity, one per frame
         self.chest = None  # range bin currently followed
+        self.hr = None  # last heart rate, for continuity
 
     def reset(self):
         self.vel.clear()
-        self.chest = None
+        self.chest = self.hr = None
 
     def update(self, H, n_new):
         """H: complex [time, bin, antenna], the latest frames (SELECT_S of them are used).
@@ -109,8 +143,8 @@ class Breathing:
         n_new = min(n_new, len(W) - 1) if self.vel else len(W) - 1
         if not len(cand):
             self.vel.extend([0.0] * n_new)
-            self.chest = None
-            return {"br_period_s": None, "br_bpm": None, "br_q": 0.0, "br_depth_mm": 0.0, "br_range_m": None, "br_moving": 0.0, "breaths": [], "wave": np.zeros(1), "shifting": np.zeros(1, bool)}
+            self.chest = self.hr = None
+            return {"hr_bpm": None, "hr_q": 0.0, "hr_peak_bpm": None, "hr_harmonic": False, "br_period_s": None, "br_bpm": None, "br_q": 0.0, "br_depth_mm": 0.0, "br_range_m": None, "br_moving": 0.0, "breaths": [], "wave": np.zeros(1), "shifting": np.zeros(1, bool)}
         vel = np.angle((W[1:, cand] * W[:-1, cand].conj()).sum(axis=2)) * self.mm * fs
         waves = np.array([breath_wave(v, fs) for v in vel.T])
         regular = np.array([period_of(w, fs)[1] for w in waves])
@@ -124,6 +158,7 @@ class Breathing:
             group = np.flatnonzero(np.nan_to_num([np.corrcoef(waves[best], w)[0, 1] for w in waves]) >= 0.6)
         if not len(group):
             group = np.array([best])
+        self.bins = cand[group]  # range bins taken as the chest
         self.vel.extend(vel[-n_new:, group].mean(axis=1))
 
         track = np.array(self.vel)
@@ -134,7 +169,13 @@ class Breathing:
         breaths = [((len(x) - e) / fs, (e - s) / fs, d) for s, e, d in cut_breaths(x, fs, shifting) if e >= len(x) - recent]
         if len(breaths) >= 2:
             period = float(np.median([b[1] for b in breaths]))
+        self.hr, hr_q, hr_peak = heart_rate(track[-int(HEART_S * fs) :], fs, self.hr)
         return {
+            "hr_bpm": self.hr,
+            "hr_q": hr_q,
+            "hr_peak_bpm": hr_peak,  # differs from hr_bpm when continuity overrode the strongest peak
+            # the heart rate sits on a multiple of the breathing rate: it may be breathing, not the heart
+            "hr_harmonic": bool(not np.isnan(period) and any(abs(self.hr / 60 - k / period) < 0.05 for k in range(2, 7))),
             "br_period_s": None if np.isnan(period) else period,
             "br_bpm": None if np.isnan(period) else 60 / period,
             "br_q": q,

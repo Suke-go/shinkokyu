@@ -264,7 +264,7 @@ def describe(r):
     else:
         last = " ".join(f"{b['period_s']:.1f}" for b in r["breaths"][-6:])
         breathing = f"breathing {r['br_period_s']:.1f} s a breath ({r['br_bpm']:.1f}/min), {r['br_depth_mm']:.1f} mm deep, regularity {r['br_q']:.2f}, last breaths [{last}] s"
-    heart = f"heart {r['hr_bpm']:.0f} bpm" + ("" if r["hr_q"] >= 0.35 else " (unreliable)")
+    heart = "heart: -" if r["hr_bpm"] is None else f"heart {r['hr_bpm']:.0f} bpm" + ("" if r["hr_q"] >= 0.35 else " (unreliable)")
     return f"{r['br_range_m'] or r['range_m']:.2f} m ({r['snr_db']:.0f} dB) | {breathing} | {heart}"
 
 
@@ -373,7 +373,7 @@ def main():
                                     est_fnum = fnums[-1]
                                     row = {"t": anchor + fnums[-1] * FRAME_MS, "window": args.window}
                                     row.update({k: v for k, v in result.items() if not isinstance(v, (np.ndarray, tuple))})
-                                    row.update({k: v for k, v in b.items() if k.startswith("br_")})
+                                    row.update({k: v for k, v in b.items() if k.startswith(("br_", "hr_"))})  # breathing and heart rate from the one chest track
                                     # each breath that ended in the last 30 s: when it ended, how long it took, how deep it was
                                     row["breaths"] = [{"t": row["t"] - ago * 1000, "period_s": p, "depth_mm": d} for ago, p, d in b["breaths"]]
                                     hr_log.write(json.dumps(row) + "\n")
