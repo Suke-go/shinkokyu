@@ -23,6 +23,8 @@ import numpy as np
 import serial
 from serial.tools import list_ports
 
+from breathing import SELECT_S, Breathing
+
 HERE = Path(__file__).parent
 C = 299792458.0
 MAGIC = bytes([2, 1, 4, 3, 6, 5, 8, 7])
@@ -253,19 +255,17 @@ def analyze(H, rmin, rmax):
 
 
 def describe(r):
+    """One line for a row of the .hr.jsonl."""
     if not r["present"]:
         what = "nothing in the beam" if r["snr_db"] < SNR_MIN_DB else "something in the beam, but it does not breathe"
         return f"no person: {what} (reflection {r['snr_db']:.0f} dB over the floor, motion {r['span_mm']:.2f} mm). Re-aim the radar"
-    notes = []
-    if r["hr_q"] < 0.35:
-        notes.append("HR peak weak")
-    if r["hr_harmonic"]:
-        notes.append("HR peak sits on a breathing harmonic")
-    return (
-        f"range {r['range_m']:.2f} m ({r['snr_db']:.0f} dB) | breathing {r['br_bpm']:4.1f}/min "
-        f"(chest {r['span_mm']:.2f} mm) | heart {r['hr_bpm']:5.1f} bpm (q={r['hr_q']:.2f})"
-        + (f"  [{'; '.join(notes)}]" if notes else "")
-    )
+    if r["br_period_s"] is None:
+        breathing = "breathing: no regular cycle yet"
+    else:
+        last = " ".join(f"{b['period_s']:.1f}" for b in r["breaths"][-6:])
+        breathing = f"breathing {r['br_period_s']:.1f} s a breath ({r['br_bpm']:.1f}/min), {r['br_depth_mm']:.1f} mm deep, regularity {r['br_q']:.2f}, last breaths [{last}] s"
+    heart = f"heart {r['hr_bpm']:.0f} bpm" + ("" if r["hr_q"] >= 0.35 else " (unreliable)")
+    return f"{r['br_range_m'] or r['range_m']:.2f} m ({r['snr_db']:.0f} dB) | {breathing} | {heart}"
 
 
 def save_plot(r, path):
@@ -323,8 +323,9 @@ def main():
     sync("start")
     strap = subprocess.Popen([sys.executable, str(HERE / "strap.py"), f"{stem}.rr.jsonl"]) if args.strap else None
     win = int(args.window * FRAME_HZ)
-    window = deque(maxlen=win)  # (fnum, complex H)
-    anchor, last_fnum, last, result, configured = np.inf, -1, 0.0, None, False
+    window = deque(maxlen=max(win, int(SELECT_S * FRAME_HZ)))  # (fnum, complex H): breathing looks further back than the heart rate
+    breath = Breathing(FRAME_HZ, WAVELENGTH / (4 * np.pi) * 1e3, np.arange(N_SAMPLES) * RANGE_RES, args.rmin, args.rmax)
+    anchor, last_fnum, last, result, configured, est_fnum = np.inf, -1, 0.0, None, False, None
     t0 = time.time()
     done = lambda: args.seconds and time.time() - t0 >= args.seconds
     try:
@@ -351,6 +352,8 @@ def main():
                                     if fnum < last_fnum:  # sensor was restarted: new frame clock
                                         anchor = np.inf
                                         window.clear()
+                                        breath.reset()
+                                        est_fnum = None
                                     last_fnum = fnum
                                     # Earliest arrival relative to the radar's own frame clock = least USB delay.
                                     # shortcut: still ~15-20 ms late (frame processing + UART) and ignores crystal
@@ -364,12 +367,18 @@ def main():
                                         print(f"collecting... {len(window)}/{win} frames", flush=True)
                                         continue
                                     fnums = [f for f, _ in window]
-                                    result = analyze(fill_gaps(fnums, np.array([h for _, h in window])), args.rmin, args.rmax)
+                                    H = fill_gaps(fnums, np.array([h for _, h in window]))
+                                    result = analyze(H[-win:], args.rmin, args.rmax)
+                                    b = breath.update(H, fnums[-1] - est_fnum if est_fnum is not None else len(H))
+                                    est_fnum = fnums[-1]
                                     row = {"t": anchor + fnums[-1] * FRAME_MS, "window": args.window}
                                     row.update({k: v for k, v in result.items() if not isinstance(v, (np.ndarray, tuple))})
+                                    row.update({k: v for k, v in b.items() if k.startswith("br_")})
+                                    # each breath that ended in the last 30 s: when it ended, how long it took, how deep it was
+                                    row["breaths"] = [{"t": row["t"] - ago * 1000, "period_s": p, "depth_mm": d} for ago, p, d in b["breaths"]]
                                     hr_log.write(json.dumps(row) + "\n")
                                     hr_log.flush()
-                                    print(describe(result), flush=True)
+                                    print(describe(row), flush=True)
                         finally:
                             try:
                                 cli_send(cli, "sensorStop", 2)

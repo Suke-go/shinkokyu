@@ -48,6 +48,28 @@ H[:, b, :] += 2000  # a chair: strong, but it does not breathe
 r = v.analyze(H, 0.3, 1.5)
 assert not r["present"] and r["snr_db"] > v.SNR_MIN_DB and r["span_mm"] < 0.2, (r["snr_db"], r["span_mm"])
 
+# --- breathing: 15 a minute (3 mm) for 60 s, then 7.5 a minute (6 mm); a reflector 3 bins further is stronger but only wanders
+import breathing as br
+
+t = np.arange(int(120 * v.FRAME_HZ)) / v.FRAME_HZ
+f = np.where(t < 60, 0.25, 0.125)
+d = np.where(t < 60, 1.5e-3, 3e-3) * np.sin(2 * np.pi * np.cumsum(f) / v.FRAME_HZ) + 0.1e-3 * np.sin(2 * np.pi * 1.15 * t)
+shape = (len(t), v.N_SAMPLES, v.N_ANT)
+H = 5 * (rng.standard_normal(shape) + 1j * rng.standard_normal(shape))
+H[:, b, :] += 1500 * np.exp(1j * 4 * np.pi * d / v.WAVELENGTH)[:, None]
+H[:, b + 3, :] += 4000 * np.exp(1j * 4 * np.pi * 2e-3 * np.cumsum(rng.standard_normal(len(t))) / 40 / v.WAVELENGTH)[:, None]
+tracker = br.Breathing(v.FRAME_HZ, v.WAVELENGTH / (4 * np.pi) * 1e3, np.arange(v.N_SAMPLES) * v.RANGE_RES, 0.3, 1.5)
+hop, look = int(2 * v.FRAME_HZ), int(br.SELECT_S * v.FRAME_HZ)
+seen = {}
+for end in range(int(20 * v.FRAME_HZ), len(t) + 1, hop):
+    seen[end / v.FRAME_HZ] = tracker.update(H[max(end - look, 0) : end], hop)
+r = seen[50.0]
+assert abs(r["br_period_s"] - 4.0) < 0.3 and abs(r["br_depth_mm"] - 3.0) < 0.6, (r["br_period_s"], r["br_depth_mm"])
+assert abs(r["br_range_m"] - 0.6) < v.RANGE_RES, r["br_range_m"]  # the chest, not the stronger reflector
+assert all(abs(p - 4.0) < 0.4 for _, p, _ in r["breaths"]), r["breaths"]
+r = seen[110.0]
+assert abs(r["br_period_s"] - 8.0) < 0.6 and abs(r["br_depth_mm"] - 6.0) < 1.2, (r["br_period_s"], r["br_depth_mm"])
+
 # --- chest strap: Heart Rate Measurement packets (8-bit and 16-bit rate, with and without energy field)
 import strap
 
