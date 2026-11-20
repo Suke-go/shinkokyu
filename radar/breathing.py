@@ -13,10 +13,10 @@ Steps (the usual ones for FMCW vital signs, e.g. Alizadeh et al., IEEE Access 20
   5. The wave is cut into breaths at its upward zero crossings. A stretch in which the body itself was
      shifting is not counted as a breath.
   6. Heart rate, after breathing and never against it: the spectrum of what the breathing smoother left
-     over (as velocity), scored together with its second harmonic. Peaks on the 2nd to 5th multiple of the
-     measured breathing rate are breathing, not heartbeat, and are not candidates; if nothing else is
-     left there is no heart rate for that moment. A peak near the previous estimate is preferred if it is at
-     least half as strong as the strongest: a heart rate does not jump 20 beats in 2 s.
+     over (as velocity), scored together with its second harmonic. A peak near the previous estimate is
+     preferred if it is at least half as strong as the strongest: a heart rate does not jump 20 beats in 2 s.
+     A peak on the 2nd to 5th multiple of the measured breathing rate is kept only if the heart rate was
+     already there; otherwise there is no heart rate for that moment, rather than a guess.
 """
 from collections import deque
 
