@@ -19,7 +19,7 @@ const SWING_S: f64 = 30.0; //   (75th percentile) of the last SWING_S
 pub const SELECT_S: f64 = 30.0; // the chest is looked for in this much data
 const KEEP_S: f64 = 60.0; // length of the continuous track
 // The chest is looked for among the bins that reflect at least MIN_DB over the noise floor (an empty beam shows
-// 7-13 dB, a back 19-29, a chest 28-39) and lie within BODY_M of the strongest reflection: a weak bin far from
+// 7-13 dB, a back 19-29, a chest 28-39) and lie within BODY_M of the strongest moving one: a weak bin far from
 // the body is noise, however regularly it happens to move.
 const MIN_DB: f64 = 16.0;
 const BODY_M: f64 = 0.25;
@@ -146,7 +146,7 @@ fn turning_points(x: &[f64], th: &[f64]) -> Vec<usize> {
 
 /// Breathing wave -> (start index, end index, depth mm) per breath. A breath is one rise and one fall, each
 /// at least SWING_SHARE of the larger swings of the last SWING_S, whatever level the wave sits at; it runs
-/// from halfway up one rise to halfway up the next.
+/// from halfway down one fall to halfway down the next: the middle of an inhale (the wave is the distance to the chest).
 fn cut_breaths(x: &[f64], fs: f64, shifting: &[bool]) -> Vec<(usize, usize, f64)> {
     let mut th = vec![MIN_DEPTH_MM; x.len()];
     let small = turning_points(x, &th);
@@ -160,7 +160,7 @@ fn cut_breaths(x: &[f64], fs: f64, shifting: &[bool]) -> Vec<(usize, usize, f64)
         b0 += block;
     }
     let turns = turning_points(x, &th);
-    let marks: Vec<usize> = turns.windows(2).filter(|w| x[w[1]] > x[w[0]]).map(|w| w[0] + x[w[0]..=w[1]].iter().position(|v| *v >= (x[w[0]] + x[w[1]]) / 2.0).unwrap()).collect();
+    let marks: Vec<usize> = turns.windows(2).filter(|w| x[w[1]] < x[w[0]]).map(|w| w[0] + x[w[0]..=w[1]].iter().position(|v| *v <= (x[w[0]] + x[w[1]]) / 2.0).unwrap()).collect();
     let mut out = Vec::new();
     for w in marks.windows(2) {
         let (a, e) = (w[0], w[1]);
@@ -301,9 +301,21 @@ impl Breathing {
         }
         let floor = noise_floor(&amp, (self.rmin / self.range_res).ceil() as usize);
         let db: Vec<f64> = amp.iter().map(|a| 20.0 * (a / floor).log10()).collect();
-        let near: Vec<usize> = (0..self.n_bins).filter(|&b| range(b) >= self.rmin && range(b) <= self.rmax).collect();
-        let body = near.iter().copied().max_by(|a, b| db[*a].total_cmp(&db[*b])).map_or(0.0, range);
-        let cand: Vec<usize> = near.into_iter().filter(|&b| db[b] >= MIN_DB && (range(b) - body).abs() <= BODY_M).collect();
+        let strong: Vec<usize> = (0..self.n_bins).filter(|&b| range(b) >= self.rmin && range(b) <= self.rmax && db[b] >= MIN_DB).collect();
+        // the body is the strongest reflection that moves: a wall behind can reflect more than a chest, but stays put
+        let moving_amp: Vec<f64> = strong
+            .iter()
+            .map(|&b| {
+                (b * N_ANT..(b + 1) * N_ANT)
+                    .map(|i| {
+                        let m = (0..t).map(|ti| frames[ti * w + i]).sum::<Complex64>() / t as f64;
+                        (0..t).map(|ti| (frames[ti * w + i] - m).norm()).sum::<f64>()
+                    })
+                    .sum()
+            })
+            .collect();
+        let body = (0..strong.len()).max_by(|a, b| moving_amp[*a].total_cmp(&moving_amp[*b])).map_or(0.0, |i| range(strong[i]));
+        let cand: Vec<usize> = strong.into_iter().filter(|&b| (range(b) - body).abs() <= BODY_M).collect();
         let n_new = if self.vel.is_empty() { t - 1 } else { n_new.min(t - 1) };
         let push = |vel: &mut VecDeque<f64>, v: f64| {
             if vel.len() == (KEEP_S * fs) as usize {
@@ -439,6 +451,16 @@ mod tests {
         assert!((r.br_range_m.unwrap() - 0.6).abs() < chirp.range_res, "{:?}", r.br_range_m);
         assert!(r.breaths.iter().all(|b| (b.1 - 4.0).abs() < 0.4), "{:?}", r.breaths);
         assert!((r.hr_bpm.unwrap() - 69.0).abs() < 3.0 && r.hr_q > 0.35, "{:?} {}", r.hr_bpm, r.hr_q);
+    }
+
+    #[test]
+    fn a_wall_behind_that_reflects_more_than_the_chest_is_not_followed() {
+        let chirp = Chirp::load();
+        let mut h = scene(&chirp, 50.0, 1500.0, 0.0, |s| 1.5e-3 * (2.0 * PI * 0.25 * s).sin());
+        let wall = ((1.45 / chirp.range_res).round() as usize) * N_ANT;
+        h.chunks_exact_mut(chirp.n_bins * N_ANT).for_each(|row| row[wall..wall + N_ANT].iter_mut().for_each(|v| *v += 6000.0));
+        let r = run(&chirp, &h);
+        assert!((r.br_range_m.unwrap() - 0.6).abs() < chirp.range_res && (r.br_period_s.unwrap() - 4.0).abs() < 0.3, "{:?} {:?}", r.br_range_m, r.br_period_s);
     }
 
     #[test]
