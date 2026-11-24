@@ -299,6 +299,7 @@ def main():
     ap.add_argument("--backend", choices=["auto", "server", "supabase"], default="auto",
                     help="clock to sync with; must match the typing page's mode (auto = server if it answers, else supabase)")
     ap.add_argument("--strap", action="store_true", help="also log a Bluetooth chest strap (strap.py) as the reference")
+    ap.add_argument("--belt", action="store_true", help="also log a breathing belt on an Arduino (belt.py) as the reference")
     ap.add_argument("--out", default=str(HERE / "captures"))
     args = ap.parse_args()
 
@@ -320,7 +321,8 @@ def main():
         Path(f"{stem}.json").write_text(json.dumps(meta))
 
     sync("start")
-    strap = subprocess.Popen([sys.executable, str(HERE / "strap.py"), f"{stem}.rr.jsonl"]) if args.strap else None
+    side = [subprocess.Popen([sys.executable, str(HERE / script), f"{stem}{ext}"])
+            for on, script, ext in ((args.strap, "strap.py", ".rr.jsonl"), (args.belt, "belt.py", ".belt.csv")) if on]
     win = int(args.window * FRAME_HZ)
     window = deque(maxlen=max(win, int(SELECT_S * FRAME_HZ)))  # (fnum, complex H): breathing looks further back than the heart rate
     breath = Breathing(FRAME_HZ, WAVELENGTH / (4 * np.pi) * 1e3, np.arange(N_SAMPLES) * RANGE_RES, args.rmin, args.rmax)
@@ -395,8 +397,8 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        if strap:
-            strap.terminate()
+        for p in side:
+            p.terminate()
         sync("end")
     if result:
         save_plot(result, f"{stem}.png")

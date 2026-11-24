@@ -29,21 +29,11 @@
       <li>書式設定はありません。</li>
       <li>途中で手を止めても構いません。</li>
     </ul>
+    <p class="muted" id="ready-radar" hidden>この実験では、からだの動きをレーダーで測っています。ふだんどおり自由に入力していただいて構いません。無理に同じ姿勢を保つ必要もありません。<br>ただ、椅子の位置を変える、からだを大きく前後に倒す、席を立つ、といった大きな動きは、課題が終わるまで控えてください。</p>
     <button class="btn primary big" id="start-btn" type="button">スタート</button>
     <p class="sync-line" id="sync-line" role="status" aria-live="polite"></p>
     <p class="err" id="ready-err" role="alert"></p>
   </div>
-</main>
-
-<main id="s-base" class="screen center" hidden>
-  <div class="card">
-    <h1>安静時の呼吸を測っています</h1>
-    <p class="muted">楽な姿勢で座り、普通に呼吸してください。時間になると、自動で課題が始まります。</p>
-    <progress id="base-bar" value="0" max="1"></progress>
-    <p class="muted small num" id="base-left"></p>
-    <p class="sync-line" id="base-why" role="status" aria-live="polite"></p>
-  </div>
-  <button id="base-skip" type="button" aria-label="安静時の計測を飛ばす（実験者用）"></button>
 </main>
 
 <div id="s-task" class="task" hidden>
@@ -72,7 +62,7 @@
 
   <footer class="status num">
     <span id="st-count"></span>
-    <span class="st-mid"><i class="dot" id="st-dot"></i><i class="radar" id="st-radar" title="レーダー計測" hidden>♥</i></span>
+    <span class="st-mid"><i class="dot" id="st-dot"></i><span class="radar" id="st-radar" role="img" aria-label="レーダーの信号の質" hidden><i></i><i></i><i></i></span></span>
     <span id="st-lang" class="st-right"></span>
   </footer>
 
@@ -93,6 +83,7 @@
     <h1>ご協力ありがとうございました</h1>
     <p class="muted">この画面を閉じて構いません。</p>
     <p class="muted small" id="done-id"></p>
+    <p class="muted small" id="done-radar"></p>
     <button class="btn" id="dl-btn" type="button" hidden>記録をもう一度ダウンロード</button>
   </div>
 </main>

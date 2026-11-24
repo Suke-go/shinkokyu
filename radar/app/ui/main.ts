@@ -5,6 +5,7 @@ type Live = {
   hr_bpm: number | null;
   hr_q: number;
   wave: number[]; // the tracker's breathing wave of the last 30 s; only its length is used here
+  breaths: { t: number; period_s: number }[]; // the breaths that ended in the last 30 s: when (ms, the recording's clock), how long
   cuts: number[]; // indices into `wave` where a breath starts or ends
 };
 type Wave = { y: number[] }; // the chest's displacement as it happens, mm, drift included, one value per radar frame
@@ -15,7 +16,7 @@ type Win = { once(event: string, fn: () => void): void; setFocus(): Promise<void
 declare global {
   interface Window {
     __TAURI__: {
-      core: { invoke<T>(cmd: string): Promise<T> };
+      core: { invoke<T>(cmd: string, args?: object): Promise<T> };
       event: { listen<T>(name: string, fn: (e: { payload: T }) => void): Promise<unknown> };
       webviewWindow: { WebviewWindow: { new (label: string, options: object): Win; getByLabel(label: string): Promise<Win | null> } };
     };
@@ -38,7 +39,11 @@ const FRAME_HZ = 40, SPAN_MS = 30000; // radar frames a second; how much of the 
 const el = (id: string) => document.getElementById(id)!;
 const hr = el("hr"), br = el("br"), per = el("per"), note = el("note"), why = el("why"), toggle = el("toggle");
 const canvas = el("trace") as HTMLCanvasElement, strip = el("seen") as HTMLCanvasElement;
-const setState = (s: string) => { document.body.dataset.state = s; };
+const rest = el("rest") as HTMLButtonElement, lap = el("lap");
+const setState = (s: string) => {
+  document.body.dataset.state = s;
+  rest.disabled = !(mine && s === "streaming"); // the stopwatch times a measurement started on this screen
+};
 const setQuality = (q: number, reason: string) => {
   document.body.dataset.quality = String(q);
   why.textContent = WHY[reason] ?? "";
@@ -55,7 +60,7 @@ let marks: number[] = [];
 let lo = -1, hi = 1; // vertical range, eased so the line does not jump when it rescales
 let frameId = 0;
 
-// Minutes of resting breathing the typing task measures before it starts; 0 = none. The task window reads it.
+// Planned minutes of the resting measurement: the stopwatch shows when they are reached; 0 = no plan.
 const mins = el("mins");
 let minutes = 3;
 try { minutes = Number(localStorage.getItem("baselineMinutes") ?? 3); } catch { /* storage unavailable */ }
@@ -145,7 +150,43 @@ function drawSeen() {
 }
 new ResizeObserver(drawSeen).observe(strip);
 
+// The resting measurement is a stopwatch: the experimenter starts it once the bars are full, watches the line, and
+// stops it. What it timed is kept as rest_<stamp>.json next to the recording; export.py pairs it with the typing
+// session that follows.
+let lapT0 = 0, lapTimer = 0;
+let lapBreaths: { t: number; period_s: number }[] = [];
+const mmss = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+function endLap() {
+  if (!lapT0) return;
+  clearInterval(lapTimer);
+  const t0 = lapT0, t1 = Date.now(), seconds = (t1 - t0) / 1000;
+  const p = lapBreaths.map((b) => b.period_s).sort((a, b) => a - b);
+  const period = p.length ? (p[(p.length - 1) >> 1] + p[p.length >> 1]) / 2 : null;
+  lapT0 = 0;
+  rest.classList.remove("on");
+  rest.setAttribute("aria-pressed", "false");
+  const said = `安静 ${mmss(seconds)}・呼吸 ${p.length} 回${period ? `・1 呼吸 ${period.toFixed(1)} 秒` : ""}`;
+  invoke<string>("save_rest", { text: JSON.stringify({ t0, t1, seconds, planned: minutes * 60, breaths: p.length, period_s: period }) })
+    .then(() => { note.textContent = `${said}（保存しました）`; }, (e) => { note.textContent = `${said}（保存できませんでした: ${e}）`; });
+}
+rest.onclick = () => {
+  if (lapT0) return endLap();
+  lapT0 = Date.now();
+  lapBreaths = [];
+  note.textContent = "";
+  rest.classList.add("on");
+  rest.setAttribute("aria-pressed", "true");
+  const tick = () => {
+    const s = (Date.now() - lapT0) / 1000;
+    lap.textContent = mmss(s);
+    rest.classList.toggle("reached", minutes > 0 && s >= minutes * 60);
+  };
+  tick();
+  lapTimer = setInterval(tick, 200);
+};
+
 function reset() {
+  endLap(); // the measurement ended under the stopwatch: what it timed so far is kept
   mine = estimating = false;
   setState("idle");
   setQuality(0, "");
@@ -222,11 +263,15 @@ listen<Live>("live", ({ payload: e }) => {
   show(hr, e.quality >= 2 ? e.hr_bpm : null, e.hr_q >= 0.35);
   const now = performance.now();
   marks = e.quality >= 2 ? e.cuts.map((c) => now - ((e.wave.length - c) * 1000) / FRAME_HZ) : [];
+  // under the stopwatch: each breath that began and ended since it started, once
+  for (const b of e.breaths) {
+    if (lapT0 && b.t - b.period_s * 1000 >= lapT0 && b.t > (lapBreaths[lapBreaths.length - 1]?.t ?? 0) + 1000) lapBreaths.push(b);
+  }
 });
 
 listen<Stopped>("stopped", ({ payload }) => {
   reset();
-  note.textContent = payload.error ?? "";
+  if (payload.error) note.textContent = payload.error; // otherwise the line stays: what the stopwatch timed
 });
 
 export {};

@@ -10,10 +10,12 @@ Steps (the usual ones for FMCW vital signs, e.g. Alizadeh et al., IEEE Access 20
   2. Steps no breathing chest could make are clipped: they are phase jumps or the body shifting.
   3. Displacement, smoothed with a Gaussian (noise and heartbeat out) minus a wide Gaussian of itself
      (posture drift out). What is left is the breathing wave.
-  4. The range bin whose wave repeats most regularly is taken as the chest, with the neighbours that move
-     with it. The strongest reflection is often not the chest.
-  5. The wave is cut into breaths at its rises: one rise and one fall, each a fair share of the recent
-     swings, make a breath, whatever level the wave sits at. A stretch in which the body itself was
+  4. The body is where the strongest moving reflection is (a wall behind can reflect more than a chest, but
+     stays put). Among the bins around it, the one whose wave repeats most regularly is taken as the chest,
+     with the neighbours that move with it.
+  5. The wave is cut into breaths at its falls, the inhales (the wave is the distance to the chest): one fall
+     and one rise, each a fair share of the recent swings, make a breath, whatever level the wave sits at.
+     A stretch in which the body itself was
      shifting is not counted as a breath. Breaths faster than 35 a minute are not counted: at that speed
      they are the size and nearly the rate of the heartbeat's motion, and this wave cannot tell them apart.
   6. Heart rate, after breathing and never against it: the spectrum of what the breathing smoother left
@@ -36,7 +38,7 @@ MIN_DEPTH_MM = 0.3  # shallower than this is not a breath
 SWING_SHARE, SWING_S = 0.3, 30.0  # a breath swings at least this share of the larger swings of the last SWING_S
 SELECT_S = 30.0  # the chest is looked for in this much data
 # The chest is looked for among the bins that reflect at least this much over the noise floor (an empty beam
-# shows 7-13 dB, a back 19-29, a chest 28-39) and lie within BODY_M of the strongest reflection: a weak bin far
+# shows 7-13 dB, a back 19-29, a chest 28-39) and lie within BODY_M of the strongest moving one: a weak bin far
 # from the body is noise, however regularly it happens to move.
 MIN_DB = 16
 BODY_M = 0.25
@@ -120,8 +122,9 @@ def cut_breaths(x, fs, shifting=None):
     be at least SWING_SHARE of the larger swings of the last SWING_S (their 75th percentile; the rule of
     Schaefer & Kratky 2008 for respiratory signals, with a larger share because a radar wave carries more
     ripple than a chest belt): the ripple in the pause after a deep breath out is small next to that breath,
-    while a quiet breather's 1 mm swings are all there is and count. A breath runs from halfway up one
-    rise to halfway up the next, the steepest and so best-timed point of the wave.
+    while a quiet breather's 1 mm swings are all there is and count. A breath runs from halfway down one
+    fall to halfway down the next: the wave is the distance to the chest, so that is the middle of an inhale,
+    the quicker side of a breath and the one that agreed best with a breathing belt.
     Stretches where `shifting` is True for more than a tenth of their length are dropped.
     """
     floor = np.full(len(x), MIN_DEPTH_MM)
@@ -133,7 +136,7 @@ def cut_breaths(x, fs, shifting=None):
         if len(recent) >= 3:
             th[b0 : b0 + block] = max(SWING_SHARE * np.percentile(recent, 75), MIN_DEPTH_MM)
     turns = turning_points(x, th)
-    marks = [a + int(np.argmax(x[a : b + 1] >= (x[a] + x[b]) / 2)) for a, b in zip(turns[:-1], turns[1:]) if x[b] > x[a]]
+    marks = [a + int(np.argmax(x[a : b + 1] <= (x[a] + x[b]) / 2)) for a, b in zip(turns[:-1], turns[1:]) if x[b] < x[a]]
     out = []
     for a, e in zip(marks[:-1], marks[1:]):
         depth = float(np.ptp(x[a : e + 1]))
@@ -216,8 +219,11 @@ class Breathing:
         amp = np.abs(W).mean(axis=(0, 2))
         db = 20 * np.log10(amp / np.percentile(amp[self.rng >= self.rmin], 20))
         near = (self.rng >= self.rmin) & (self.rng <= self.rmax)
-        body = self.rng[int(np.argmax(np.where(near, db, -np.inf)))]
-        cand = np.flatnonzero(near & (db >= MIN_DB) & (np.abs(self.rng - body) <= BODY_M))
+        strong = near & (db >= MIN_DB)
+        # the body is the strongest reflection that moves: a wall behind can reflect more than a chest, but stays put
+        moving_amp = np.abs(W - W.mean(axis=0)).mean(axis=(0, 2))
+        body = self.rng[int(np.argmax(np.where(strong, moving_amp, -np.inf)))]
+        cand = np.flatnonzero(strong & (np.abs(self.rng - body) <= BODY_M))
         n_new = min(n_new, len(W) - 1) if self.vel else len(W) - 1
         if not len(cand):
             self.vel.extend([0.0] * n_new)

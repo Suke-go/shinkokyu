@@ -81,12 +81,17 @@ body { overflow: hidden; }
 .dot.good { background: var(--ok); }
 .dot.bad { background: #D69E00; }
 #done-id { white-space: pre-line; overflow-wrap: anywhere; }
-/* for the experimenter: an unmarked corner that skips the resting measurement */
-#base-skip { position: fixed; right: 0; bottom: 0; width: 56px; height: 56px; border: 0; background: none; opacity: 0; cursor: default; }
-#base-bar { width: 100%; height: 6px; margin-top: var(--s4); accent-color: var(--accent); }
-/* desktop app only: pale until a breathing person is in the radar's beam */
-.radar { margin-left: var(--s2); font-style: normal; color: var(--line); }
-.radar.on { color: var(--ink-2); }
+#ready-radar { margin: 0 0 var(--s5); line-height: 1.9; }
+/* desktop app only, for the experimenter's glance: the radar's signal quality, the bars of the app's first screen */
+.radar { display: inline-flex; align-items: flex-end; gap: 2px; height: 10px; margin-left: var(--s2); }
+.radar[hidden] { display: none; }
+.radar i { width: 3px; border-radius: 1px; background: var(--line); }
+.radar i:nth-child(1) { height: 40%; }
+.radar i:nth-child(2) { height: 70%; }
+.radar i:nth-child(3) { height: 100%; }
+.radar:is([data-q="1"], [data-q="2"], [data-q="3"]) i:nth-child(1),
+.radar:is([data-q="2"], [data-q="3"]) i:nth-child(2),
+.radar[data-q="3"] i:nth-child(3) { background: var(--ink-2); }
 
 .scrim { position: fixed; inset: 0; background: rgba(31,35,40,.35); display: grid; place-items: center; padding: var(--s5); }
 .dialog { max-width: 360px; }

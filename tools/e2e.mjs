@@ -22,10 +22,11 @@ try {
   ws.onmessage = m => { const d = JSON.parse(m.data); if (d.id && pending.has(d.id)) { pending.get(d.id)(d); pending.delete(d.id); } };
   await send('Page.enable'); await send('Runtime.enable');
   // stand-in for the desktop app (radar/app): records invoke calls, lets the test deliver an estimate
-  await send('Page.addScriptToEvaluateOnNewDocument', { source: `try{localStorage.setItem('baselineMinutes','0.05')}catch{};window.__calls=[];window.__on={};window.__TAURI__={core:{invoke:async(c,a)=>{__calls.push([c,a])}},event:{listen:async(n,f)=>{__on[n]=f}}}` });
+  await send('Page.addScriptToEvaluateOnNewDocument', { source: `window.__calls=[];window.__on={};window.__TAURI__={core:{invoke:async(c,a)=>{__calls.push([c,a])}},event:{listen:async(n,f)=>{__on[n]=f}}}` });
   await send('Page.navigate', { url: BASE + '/experiment/' }); await until(`!!document.getElementById('expId')`); await wait(1500); // backend.js probes /api at import
   await ev(`document.getElementById('expId').value='demo-ja'; document.getElementById('pid').value='E2E'; document.getElementById('login-btn').click()`);
   await until(`!document.getElementById('s-ready').hidden`); await shot('e2e-ready');
+  const note = await ev(`!document.getElementById('ready-radar').hidden`);
   await ev(`document.getElementById('start-btn').click()`);
   await until(`!document.getElementById('s-task').hidden`, 20000);
   await ev(`document.getElementById('ed').focus()`);
@@ -37,12 +38,15 @@ try {
   await send('Input.imeSetComposition', { text: 'は', selectionStart: 1, selectionEnd: 1 }); await send('Input.insertText', { text: 'は' }); await wait(300);
   await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Enter',code:'Enter',text:String.fromCharCode(13),windowsVirtualKeyCode:13}); await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13}); await wait(200); await key('x','KeyX','x'); await wait(200); await shot('e2e-task');
   await ev(`__on.estimate({payload:{t:123456.5,hr_bpm:72.4,hr_q:0.6,br_bpm:15,br_period_s:4,br_depth_mm:3,br_q:0.7,br_moving:0,br_range_m:0.6,snr_db:33,present:true,quality:3,breaths:[{t:123450.5,period_s:4.1,depth_mm:3.2}]}})`);
+  const bars = await ev(`document.getElementById('st-radar').dataset.q`);
   const ta = await ev(`document.getElementById('ed').value`);
   await ev(`document.getElementById('finish-btn').click()`); await wait(200); await shot('e2e-confirm');
   await ev(`document.getElementById('end-btn').click()`);
   await until(`!document.getElementById('s-done').hidden`, 20000); await shot('e2e-done');
   const sid = await ev(`document.getElementById('done-id').textContent`);
   console.log('textarea:', JSON.stringify(ta), 'done-id:', sid);
+  const counted = await ev(`document.getElementById('done-radar').textContent`);
+  console.log('experimenter', note && bars === '3' && /^呼吸を数えられた時間: 課題 \d+%（1 回、1 呼吸 4\.1 秒）$/.test(counted) ? 'movement note, bars and counted share ok' : 'NOTE, BARS OR COUNTED SHARE WRONG', note, bars, counted);
   const list = await (await fetch(BASE + '/api/sessions')).json();
   const s = await (await fetch(BASE + '/api/sessions/' + list.find(x => x.participantId === 'E2E').sessionId)).json();
   const ev2 = s.events, types = {};
@@ -50,7 +54,7 @@ try {
   const seqs = ev2.map(e => e.seq); const dup = seqs.length - new Set(seqs).size;
   console.log('events', ev2.length, 'dupSeq', dup, 'monotonic', seqs.every((v, i) => !i || v > seqs[i - 1]), types);
   const vital = ev2.find(e => e.type === 'vital'), calls = await ev(`JSON.stringify(__calls)`);
-  console.log('radar', vital && vital.t === 123456.5 && JSON.parse(vital.data).hr === 72.4 && ev2.some(e => e.type === 'breath' && e.t === 123450.5 && JSON.parse(e.data).period === 4.1) && ev2.findIndex(e => e.type === 'baseline_start') < ev2.findIndex(e => e.type === 'baseline_end') && ev2.findIndex(e => e.type === 'baseline_end') < ev2.findIndex(e => e.type === 'session_start') ? 'baseline, vital and breath ok' : 'BASELINE, VITAL OR BREATH MISSING', calls.replace(/"pageNow":[\d.]+/, '"pageNow":<t>').replace(/\["save_typing".*?\],?(?=\[|\])/g, ''));
+  console.log('radar', vital && vital.t === 123456.5 && JSON.parse(vital.data).hr === 72.4 && ev2.some(e => e.type === 'breath' && e.t === 123450.5 && JSON.parse(e.data).period === 4.1) && !ev2.some(e => e.type.startsWith('baseline')) ? 'vital and breath ok' : 'VITAL OR BREATH MISSING', calls.replace(/"pageNow":[\d.]+/, '"pageNow":<t>').replace(/\["save_typing".*?\],?(?=\[|\])/g, ''));
   console.log('inputs', ev2.filter(e => /input|composition/.test(e.type)).map(e => `${e.type}:${e.inputType ?? ''}:${e.isComposing}:${JSON.stringify(e.data)}`).join(' | '));
   console.log('syncs', s.meta.syncs.map(x => `${x.phase} off=${x.offset.toFixed(2)} d=${x.delay.toFixed(2)} q=${x.quality}`), 'finalText', JSON.stringify(s.meta.finalText), 'eventCount', s.meta.eventCount);
   const { computeTimeline } = await import('file:///C:/Users/kosuk/shinkokyu/public/shared/metrics.js');

@@ -76,6 +76,13 @@ body:is([data-state="connecting"], [data-state="retry"], [data-state="stopping"]
 .go { width: clamp(28px, 7vmin, 48px); aspect-ratio: 1; padding: 0; background: none; color: var(--mid); }
 .go:hover { color: var(--ink); }
 .go svg { width: 100%; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+/* the stopwatch of the resting measurement: usable while this screen is measuring; its time runs beside it, dark while
+   it runs and heavier once the planned length is reached */
+#rest { position: relative; }
+#rest:disabled { color: var(--soft); cursor: default; }
+#lap { position: absolute; left: 100%; top: 50%; translate: 0 -50%; margin-left: .4em; font-size: clamp(18px, 5vmin, 40px); font-weight: 300; white-space: nowrap; color: var(--mid); }
+#rest.on, #rest.on #lap { color: var(--ink); }
+#rest.reached #lap { font-weight: 600; }
 
 #note { min-height: 1.2em; margin: 0; font-size: 12px; color: var(--mid); text-align: center; user-select: text; }
 

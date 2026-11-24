@@ -73,4 +73,11 @@ assert.ok(Math.abs(r4.offset - 250) < 3);
 const c5 = { v: 1000 };
 const r5 = await syncClock({ phase: "start", gap: 0, n: 5, drop: 1, fetchTime: async () => { c5.v += 80; const t = c5.v + 250; c5.v += 80; return { t1: t, t2: t }; }, now: () => c5.v });
 assert.equal(r5.quality, "bad"); // 160ms RTT fails the default thresholds
+// a request that fails is one sample fewer; none at all is an error, not a sync that never ends
+let c6 = 1000, k6 = 0;
+const r6 = await syncClock({ phase: "start", gap: 0, n: 8, drop: 1, goodDelay: 300, goodSpread: 20, now: () => c6,
+  fetchTime: async () => { if (k6++ % 2) throw new Error("lost"); c6 += 40; const t = c6 + 250; c6 += 40; return { t1: t, t2: t }; } });
+assert.equal(r6.n, 3);
+assert.ok(Math.abs(r6.offset - 250) < 3);
+await assert.rejects(syncClock({ phase: "start", gap: 0, n: 3, drop: 0, maxRetries: 0, now: () => 0, fetchTime: async () => { throw new Error("lost"); } }));
 console.log("clock.test.js: all passed");
