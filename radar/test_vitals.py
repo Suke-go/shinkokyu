@@ -116,4 +116,18 @@ assert strap.parse(bytes([0x10, 60, 0x00, 0x04, 0x00, 0x02])) == (60, [1000.0, 5
 assert strap.parse(bytes([0x19, 0x2C, 0x01, 9, 9, 0x00, 0x04])) == (300, [1000.0])
 assert strap.parse(bytes([0x00, 72])) == (72, [])
 
+
+# --- suspicious breaths (export.py): a breath unlike the rest of its session has no support; a lasting change has
+import export
+
+steady = np.random.default_rng(1)
+per, dep = 3 + 0.15 * steady.standard_normal(60), 2 * np.exp(0.1 * steady.standard_normal(60))
+per[20], dep[40] = 7.5, 9.0  # two breaths counted as one; a movement
+per[45:57], dep[45:57] = 6 + 0.3 * steady.standard_normal(12), 5 * np.exp(0.1 * steady.standard_normal(12))  # a minute of deep, slow breaths
+sup = export.support(np.r_[0, np.cumsum(per)[:-1]], per, dep)
+assert sup[20] < export.SUPPORT_MIN and sup[40] < export.SUPPORT_MIN, (sup[20], sup[40])
+assert (sup[47:55] > export.SUPPORT_MIN).all(), sup[45:57]  # the deep breaths support each other
+assert (np.delete(sup, [19, 20, 21, 39, 40, 41, *range(44, 58)]) > export.SUPPORT_MIN).all(), sup
+assert export.runs(np.arange(0, 5000, 25.0), np.r_[np.zeros(40, bool), np.ones(80, bool), np.zeros(80, bool)]) == [(1000.0, 2975.0)]
+
 print("ok")

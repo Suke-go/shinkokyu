@@ -3,9 +3,16 @@
     python radar/export.py                 # the app's folder (Documents/shinkokyu-radar)
     python radar/export.py <folder>        # a folder copied from another PC
 
-Writes <folder>/export/sessions.csv and breaths.csv (UTF-8 with BOM, opens in Excel). Breaths are worked out
-again from the raw radar frames with the current method, not taken from what the app showed at the time,
-so every session in a table was treated the same way.
+Writes <folder>/export/sessions.csv, breaths.csv and suspect.csv (UTF-8 with BOM, opens in Excel). Breaths are
+worked out again from the raw radar frames with the current method, not taken from what the app showed at the
+time, so every session in a table was treated the same way. A session whose raw frames are not in the folder
+(one fetched from the server, say) falls back on the breaths the app logged as it measured; `breaths_from` says which.
+
+suspect.csv lists the stretches in which the body may have moved or the counting may have gone wrong:
+  odd        a breath whose stretch (it, the one before and the one after) looks like almost nothing else in
+             the session: see `support`
+  uncounted  a pause between counted breaths longer than two usual breaths
+  moved      the body itself was shifting fast (raw frames only)
 
 Times: `t_s` is seconds from the start of typing (negative during the resting measurement); `utc` is
 filled when the session was synced to a server clock.
@@ -26,12 +33,42 @@ from breathing import follow
 from report import N_ANT, RMAX_M
 
 SESSION_COLUMNS = [
-    "session_id", "exp_id", "participant_id", "started_utc", "synced",
-    "rest_s", "rest_skipped", "rest_breaths", "rest_period_s", "rest_period_iqr_s", "rest_depth_mm", "rest_counted", "rest_moved",
-    "task_s", "task_breaths", "task_period_s", "task_period_iqr_s", "task_depth_mm", "task_counted", "task_moved",
+    "session_id", "exp_id", "participant_id", "started_utc", "synced", "breaths_from",
+    "rest_s", "rest_skipped", "rest_breaths", "rest_period_s", "rest_period_iqr_s", "rest_depth_mm", "rest_counted", "rest_moved", "rest_suspect",
+    "task_s", "task_breaths", "task_period_s", "task_period_iqr_s", "task_depth_mm", "task_counted", "task_moved", "task_suspect",
     "keys", "final_chars", "source_chars", "finished", "radar_frames_dropped",
 ]
-BREATH_COLUMNS = ["session_id", "participant_id", "phase", "t_s", "utc", "period_s", "depth_mm"]
+BREATH_COLUMNS = ["session_id", "participant_id", "phase", "t_s", "utc", "period_s", "depth_mm", "support", "suspect"]
+SUSPECT_COLUMNS = ["session_id", "participant_id", "phase", "from_s", "to_s", "kind", "note"]
+SUPPORT_MIN = 3.0  # a breath with less support than this is odd
+FEW = 10  # with fewer breaths than this in a session there is nothing to compare a breath with
+
+
+def support(start_s, period_s, depth_mm):
+    """How many other stretches of the session look like each breath's own.
+
+    A breath's stretch is the sequence of three breaths around it, each marked by (log length, log depth) in units
+    of that mark's usual spread in the session (robust, at least 10 %). Two stretches are compared with an RBF
+    kernel on the mean squared difference of their marks, exp(-d2 / 2): 1 for the same sequence, 0.6 one spread
+    apart on every mark, under 0.02 three apart. The support of a breath is that similarity summed over all other
+    breaths: about the number of look-alike stretches. A run of steady breathing supports itself, and so does a
+    different but lasting way of breathing (some minutes of deep breaths); a breath stretched by a movement, or two
+    breaths counted as one, stands alone. Where a breath has no neighbour (a pause, the ends) it stands in for it."""
+    n = len(period_s)
+    marks = np.c_[np.log(period_s), np.log(depth_mm)]
+    marks = marks / np.maximum(1.4826 * np.median(np.abs(marks - np.median(marks, axis=0)), axis=0), 0.1)
+    follows = np.abs(start_s[1:] - (start_s[:-1] + period_s[:-1])) < 0.5  # breath i+1 begins where breath i ends
+    before = np.where(np.r_[False, follows], np.arange(n) - 1, np.arange(n))
+    after = np.where(np.r_[follows, False], np.arange(n) + 1, np.arange(n))
+    stretch = np.concatenate([marks[before], marks, marks[after]], axis=1)
+    like = np.exp(-((stretch[:, None, :] - stretch[None, :, :]) ** 2).mean(axis=2) / 2)
+    return like.sum(axis=1) - 1  # without itself
+
+
+def runs(t, mask, least_ms=1000):
+    """Stretches where `mask` holds for at least `least_ms` -> [(from ms, to ms)]."""
+    edges = np.flatnonzero(np.diff(np.r_[0, mask.astype(np.int8), 0]))
+    return [(float(t[a]), float(t[b - 1])) for a, b in zip(edges[::2], edges[1::2]) if t[b - 1] - t[a] >= least_ms]
 
 
 def to_utc(syncs):
@@ -101,7 +138,7 @@ def session(folder, sid):
     last_t = max(e["t"] for e in events)
     utc = to_utc(meta.get("syncs") or [])
 
-    breaths, moved, dropped = [], {}, ""
+    breaths, moved, dropped, shifts, source = [], {}, "", [], ""
     share = lambda t, shifting, a, b: float(shifting[(t >= a) & (t < b)].mean()) if a is not None and b is not None and ((t >= a) & (t < b)).any() else None
     radar_meta, radar_bin = folder / f"radar_{sid}.json", folder / f"radar_{sid}.bin"
     offset = 0.0  # the typing page's clock minus this PC's clock
@@ -109,6 +146,13 @@ def session(folder, sid):
         offset = json.loads(radar_meta.read_text(encoding="utf-8")).get("clockOffsetMs") or 0.0
         breaths, frame_t, shifting, dropped = track(radar_bin)  # same clock as the typing events
         moved = {"rest": share(frame_t, shifting, rest0, rest1), "task": share(frame_t, shifting, task0, task1 or last_t)}
+        shifts, source = runs(frame_t, shifting), "frames"
+    else:  # no raw frames here: the breaths the app logged while it measured
+        for e in events:
+            if e["type"] == "breath":
+                d = json.loads(e["data"])
+                breaths.append({"t": e["t"], "period_s": d["period"], "depth_mm": d["depth"]})
+        source = "log" if breaths else ""
     if rest0 is None and task0 is not None:  # the rest was timed with the stopwatch before the task was opened
         timed, timed_bin = rest_before(folder, task0 - offset)
         if timed:
@@ -118,6 +162,7 @@ def session(folder, sid):
             b, frame_t, shifting, _ = track(timed_bin)
             breaths = [dict(x, t=x["t"] + offset) for x in b] + breaths
             moved["rest"] = share(frame_t + offset, shifting, rest0, rest1)
+            shifts = runs(frame_t + offset, shifting) + shifts
 
     def phase_of(t):
         if rest0 is not None and rest1 is not None and rest0 <= t < rest1:
@@ -126,11 +171,40 @@ def session(folder, sid):
 
     for b in breaths:
         b["phase"] = phase_of(b["t"])
+    counted = sorted((b for b in breaths if b["phase"]), key=lambda b: b["t"])
+    if len(counted) >= FEW:
+        period = np.array([b["period_s"] for b in counted])
+        for b, s in zip(counted, support(np.array([b["t"] for b in counted]) / 1000 - period, period, np.array([b["depth_mm"] for b in counted]))):
+            b["support"] = float(s)
+    # the suspicious stretches, as (from ms, to ms, kind, what)
+    spans = [(b["t"] - b["period_s"] * 1000, b["t"], "odd", f"{b['period_s']:.1f} s long, {b['depth_mm']:.1f} mm deep") for b in counted if b.get("support", np.inf) < SUPPORT_MIN]
+    usual = float(np.median([b["period_s"] for b in counted])) if counted else 0.0
+    for a, b in zip(counted[:-1], counted[1:]):
+        pause = (b["t"] - a["t"]) / 1000 - b["period_s"]
+        if a["phase"] == b["phase"] and pause > 2 * usual:
+            spans.append((a["t"], b["t"] - b["period_s"] * 1000, "uncounted", f"{pause:.0f} s without a counted breath"))
+    spans += [(a, b, "moved", f"shifting for {(b - a) / 1000:.0f} s") for a, b in shifts if phase_of(a) and phase_of(a) == phase_of(b)]
+    spans.sort()
+    merged = []  # stretches of one kind that touch become one
+    for a, b, kind, what in spans:
+        last = next((m for m in reversed(merged) if m[2] == kind), None)
+        if last and a - last[1] <= 500 and phase_of(a) == phase_of(last[0]):
+            last[1], last[3] = max(last[1], b), f"{last[3]}; {what}"
+        else:
+            merged.append([a, b, kind, what])
+
+    def suspect_share(a, b):  # share of a phase inside any suspicious stretch
+        if a is None or b is None or b <= a:
+            return ""
+        grid = np.arange(a, b, 100.0)
+        return round(float(np.mean(np.any([(grid >= m[0]) & (grid < m[1]) for m in merged], axis=0))) if merged else 0.0, 3)
+
     rest = phase_stats([b for b in breaths if b["phase"] == "rest"], moved.get("rest"), (rest1 - rest0) / 1000 if rest0 is not None and rest1 is not None else 0)
     task = phase_stats([b for b in breaths if b["phase"] == "task"], moved.get("task"), ((task1 or last_t) - task0) / 1000 if task0 is not None else 0)
     row = {
         "session_id": sid, "exp_id": meta.get("expId", ""), "participant_id": meta.get("participantId", ""),
-        "started_utc": iso(utc(task0)) if utc and task0 is not None else "", "synced": bool(utc),
+        "started_utc": iso(utc(task0)) if utc and task0 is not None else "", "synced": bool(utc), "breaths_from": source,
+        "rest_suspect": suspect_share(rest0, rest1), "task_suspect": suspect_share(task0, task1 or last_t),
         "rest_skipped": rest_end.get("skipped", ""),
         **{f"rest_{k}": v for k, v in rest.items()}, **{f"task_{k}": v for k, v in task.items()},
         "keys": sum(e["type"] == "keydown" and not e.get("repeat") for e in events),
@@ -141,31 +215,36 @@ def session(folder, sid):
         "session_id": sid, "participant_id": meta.get("participantId", ""), "phase": b["phase"],
         "t_s": round((b["t"] - task0) / 1000, 2) if task0 is not None else "", "utc": iso(utc(b["t"])) if utc else "",
         "period_s": round(b["period_s"], 2), "depth_mm": round(b["depth_mm"], 2),
-    } for b in breaths if b["phase"]]
-    return row, breath_rows
+        "support": round(b["support"], 1) if "support" in b else "", "suspect": int(b["support"] < SUPPORT_MIN) if "support" in b else "",
+    } for b in counted]
+    seconds = lambda t: round((t - task0) / 1000, 2) if task0 is not None else ""
+    suspect_rows = [{"session_id": sid, "participant_id": meta.get("participantId", ""), "phase": phase_of(a),
+                     "from_s": seconds(a), "to_s": seconds(b), "kind": kind, "note": what} for a, b, kind, what in merged]
+    return row, breath_rows, suspect_rows
 
 
 def main():
     folder = Path(sys.argv[1]) if len(sys.argv) > 1 else Path.home() / "Documents" / "shinkokyu-radar"
-    sessions, breaths = [], []
+    sessions, breaths, suspects = [], [], []
     for f in sorted(folder.glob("typing_*.events.jsonl")):
         sid = f.name[len("typing_") : -len(".events.jsonl")]
         try:
-            row, rows = session(folder, sid)
+            row, rows, odd = session(folder, sid)
         except (OSError, ValueError, KeyError, StopIteration) as e:  # one unreadable session must not stop the rest
             print(f"skipped {sid}: {e!r}")
             continue
         sessions.append(row)
         breaths += rows
-        print(f"{sid}: rest {row['rest_breaths']} breaths ({row['rest_period_s']} s), task {row['task_breaths']} breaths ({row['task_period_s']} s), {row['keys']} keys")
+        suspects += odd
+        print(f"{sid}: rest {row['rest_breaths']} breaths ({row['rest_period_s']} s), task {row['task_breaths']} breaths ({row['task_period_s']} s), {row['keys']} keys, {len(odd)} suspicious stretches")
     out = folder / "export"
     out.mkdir(exist_ok=True)
-    for name, columns, rows in (("sessions.csv", SESSION_COLUMNS, sessions), ("breaths.csv", BREATH_COLUMNS, breaths)):
+    for name, columns, rows in (("sessions.csv", SESSION_COLUMNS, sessions), ("breaths.csv", BREATH_COLUMNS, breaths), ("suspect.csv", SUSPECT_COLUMNS, suspects)):
         with open(out / name, "w", newline="", encoding="utf-8-sig") as fh:
             w = csv.DictWriter(fh, fieldnames=columns)
             w.writeheader()
             w.writerows(rows)
-    print(f"{len(sessions)} sessions, {len(breaths)} breaths -> {out}")
+    print(f"{len(sessions)} sessions, {len(breaths)} breaths, {len(suspects)} suspicious stretches -> {out}")
 
 
 if __name__ == "__main__":
