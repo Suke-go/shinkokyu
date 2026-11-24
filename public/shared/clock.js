@@ -5,18 +5,23 @@
 const defaultNow = () => performance.timeOrigin + performance.now();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function oneRound({ url, n, gap, drop, fetchImpl, fetchTime, now, onProgress }) {
+const within = (p, ms) => Promise.race([p, sleep(ms).then(() => { throw new Error("no answer"); })]);
+
+async function oneRound({ url, n, gap, drop, fetchImpl, fetchTime, now, onProgress, round }) {
   const samples = [];
   for (let i = 0; i < n; i++) {
     const t0 = now();
-    const { t1, t2 } = fetchTime ? await fetchTime() : await (await fetchImpl(url, { cache: "no-store" })).json();
+    let got = null; // a request that fails or is not answered in 3 s is one sample fewer, not a sync that never ends
+    try { got = await within(fetchTime ? fetchTime() : fetchImpl(url, { cache: "no-store" }).then((r) => r.json()), 3000); } catch { /* skip */ }
     const t3 = now();
-    if (i >= drop) {
+    if (got && i >= drop) {
+      const { t1, t2 } = got;
       samples.push({ t0, t1, t2, t3, offset: ((t1 - t0) + (t2 - t3)) / 2, delay: (t3 - t0) - (t2 - t1) });
     }
-    if (onProgress) onProgress(i + 1, n);
+    if (onProgress) onProgress(i + 1, n, round);
     if (gap > 0 && i < n - 1) await sleep(gap);
   }
+  if (!samples.length) throw new Error("no time sample");
   const byDelay = [...samples].sort((a, b) => a.delay - b.delay);
   const best = byDelay[0];
   const low = byDelay.slice(0, 5).map((s) => s.offset).sort((a, b) => a - b);
@@ -41,7 +46,7 @@ export async function syncClock({
   let quality = "bad";
   for (; attempts <= maxRetries; ) {
     attempts++;
-    const r = await oneRound({ url, n, gap, drop, fetchImpl, fetchTime, now, onProgress });
+    const r = await oneRound({ url, n, gap, drop, fetchImpl, fetchTime, now, onProgress, round: attempts });
     if (!best || r.delay < best.delay) best = r;
     if (r.delay < goodDelay && r.spreadLow5 < goodSpread) { quality = "good"; best = r; break; }
   }

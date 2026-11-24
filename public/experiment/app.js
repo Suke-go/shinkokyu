@@ -5,7 +5,7 @@ const $ = (id) => document.getElementById(id);
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const show = (id) => {
-  for (const s of ["s-login", "s-ready", "s-base", "s-task", "s-done"]) $(s).hidden = s !== id;
+  for (const s of ["s-login", "s-ready", "s-task", "s-done"]) $(s).hidden = s !== id;
 };
 
 let exp = null, sessionId = null, pid = "", active = false;
@@ -51,29 +51,16 @@ const saveLocalMeta = (patch) => {
   saveLocal("json", JSON.stringify(localMeta), false);
 };
 const pageNow = () => performance.timeOrigin + performance.now();
-// Resting breathing measured before the task (minutes set on the app's first screen; 0 = none).
-const WHY = {
-  empty: "レーダーに何も映っていません。実験者に知らせてください",
-  static: "呼吸の動きが見えていません。実験者に知らせてください",
-  moving: "体が動いています。楽な姿勢で、じっとしていてください",
-  few: "そのまま、普通に呼吸していてください",
-  steady: "測定できています",
-};
-let recording = false; // the radar's estimates are being logged: from the start of the baseline to the end of the task
-const base = { rows: 0, steady: 0, breaths: [], hearts: [] }; // collected while the baseline runs
+let recording = false; // the radar's estimates are being logged: from the start button to the end of the task
+const task = { breaths: [], t0: 0 }; // the breaths counted while the task runs, for the line the experimenter reads at the end
 const median = (v) => { const a = [...v].sort((x, y) => x - y); return a.length ? (a[(a.length - 1) >> 1] + a[a.length >> 1]) / 2 : null; };
 if (tauri) {
-  const heart = $("st-radar");
-  heart.hidden = false;
+  const bars = $("st-radar");
+  const setBars = (q, title) => { bars.dataset.q = q; bars.title = title; };
+  bars.hidden = $("ready-radar").hidden = false;
   let lastBreath = 0;
-  tauri.event.listen("live", ({ payload: r }) => { $("base-why").textContent = WHY[r.quality_why] || ""; });
   tauri.event.listen("estimate", ({ payload: r }) => {
     if (!recording) return;
-    if (!active) { // baseline
-      base.rows++;
-      if (r.quality === 3) base.steady++;
-      if (r.hr_bpm != null && r.hr_q >= 0.35) base.hearts.push(r.hr_bpm);
-    }
     log("vital", null, JSON.stringify({
       quality: r.quality, present: r.present, snr: r.snr_db, range: r.br_range_m,
       br: r.br_bpm, period: r.br_period_s, depth: r.br_depth_mm, regular: r.br_q, moving: r.br_moving,
@@ -83,13 +70,14 @@ if (tauri) {
     for (const b of r.breaths) { // each breath once, stamped with the moment it ended
       if (b.t <= lastBreath + 1000) continue;
       lastBreath = b.t;
-      if (!active) base.breaths.push(b);
+      if (active) task.breaths.push(b);
       log("breath", null, JSON.stringify({ period: b.period_s, depth: b.depth_mm }));
       buf[buf.length - 1].t = b.t;
     }
-    heart.classList.toggle("on", r.quality >= 2); // off: the radar is running but no breathing person is in its beam
+    // 0 nothing reflects, 1 something does, 2 a person who breathes, 3 breaths cut steadily
+    setBars(r.quality, ["何も映っていない", "呼吸の動きが見えない", "呼吸は見えているが、体が動いているか、まだ少ない", "安定して数えられている"][r.quality] || "");
   });
-  tauri.event.listen("status", () => heart.classList.remove("on")); // connecting or reconnecting
+  tauri.event.listen("status", () => setBars(0, "レーダーに接続中")); // connecting or reconnecting
   window.addEventListener("pagehide", () => { if (sessionId) radar("stop"); });
 }
 
@@ -283,7 +271,7 @@ $("start-btn").addEventListener("click", async () => {
   } else try {
     const s = await syncClock({
       phase: "start", url: be.timeUrl, ...be.timeSource,
-      onProgress: (i, n) => { line.textContent = `時刻を同期しています ${i} / ${n}`; },
+      onProgress: (i, n, round) => { line.textContent = `時刻を同期しています ${i} / ${n}${round > 1 ? `（${round} 回目）` : ""}`; },
     });
     line.textContent = qualityText(s);
     postRetry(s);
@@ -294,28 +282,6 @@ $("start-btn").addEventListener("click", async () => {
   }
   recording = true;
   radar("start", { pageNow: pageNow() });
-  let seconds = 0;
-  try { seconds = tauri ? Number(localStorage.getItem("baselineMinutes") ?? 3) * 60 : 0; } catch { /* storage unavailable */ }
-  if (seconds > 0) { // the baseline lasts exactly this long; how steady the breathing was is recorded, not waited for
-    show("s-base");
-    log("baseline_start", null, JSON.stringify({ seconds }));
-    let skipped = false, done = 0;
-    $("base-skip").onclick = () => { skipped = true; };
-    for (const t0 = pageNow(); ;) {
-      done = (pageNow() - t0) / 1000;
-      if (done >= seconds || skipped) break;
-      $("base-bar").value = done / seconds;
-      const left = Math.ceil(seconds - done);
-      $("base-left").textContent = `あと ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
-      await sleep(250);
-    }
-    const periods = base.breaths.map((b) => b.period_s).sort((a, b) => a - b);
-    log("baseline_end", null, JSON.stringify({
-      seconds: Math.min(done, seconds), skipped, steady_share: base.rows ? base.steady / base.rows : null, breaths: periods.length,
-      period: median(periods), period_iqr: periods.length > 1 ? periods[Math.floor((periods.length - 1) * 0.75)] - periods[Math.floor((periods.length - 1) * 0.25)] : null,
-      depth: median(base.breaths.map((b) => b.depth_mm)), hr: median(base.hearts),
-    }));
-  }
   $("doc-title").textContent = exp.title;
   $("doc-pid").textContent = "参加者 " + pid;
   $("src").textContent = exp.text;
@@ -324,7 +290,7 @@ $("start-btn").addEventListener("click", async () => {
   active = true;
   updateCount();
   snapshot("session_start");
-  saveLocalMeta({ startedAt: pageNow() });
+  saveLocalMeta({ startedAt: (task.t0 = pageNow()) });
   if (exp.limitMin > 0) setTimeout(() => finish(true), exp.limitMin * 60000); // the task ends by itself after this long
   ta.focus();
 });
@@ -356,6 +322,10 @@ async function finish(timeUp) {
   snapshot("session_end");
   active = recording = false;
   radar("stop");
+  if (tauri) { // for the experimenter: how much of each part was inside a counted breath (sessions.csv: rest_counted, task_counted)
+    const part = (name, seconds, breaths) => seconds > 0 ? `${name} ${Math.round(100 * Math.min(breaths.reduce((s, b) => s + b.period_s, 0) / seconds, 1))}%（${breaths.length} 回${breaths.length ? `、1 呼吸 ${median(breaths.map((b) => b.period_s)).toFixed(1)} 秒` : ""}）` : "";
+    $("done-radar").textContent = "呼吸を数えられた時間: " + part("課題", (pageNow() - task.t0) / 1000, task.breaths);
+  }
   line.textContent = "データを送信しています…";
   flush();
   saveLocalMeta({ finalText, endedAt: pageNow() });

@@ -44,7 +44,7 @@ const st = (r) => ({ ok: r.ok, status: r.status });
 const eq = (v) => "eq." + encodeURIComponent(v);
 // supabase mode: syncClock gets its samples from the rpc (t1=t2: no server-side processing time to subtract)
 export const timeSource = MODE === "supabase"
-  ? { fetchTime: async () => { const n = await sbTime(); return { t1: n, t2: n }; }, goodDelay: 300, goodSpread: 20 }
+  ? { fetchTime: async () => { const n = await sbTime(); return { t1: n, t2: n }; }, goodDelay: 300, goodSpread: 20, maxRetries: 1 } // over the internet a second round rarely does better: one retry, not three
   : null;
 
 const data = (p) => new URL("../data/" + p, import.meta.url);

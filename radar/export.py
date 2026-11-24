@@ -9,6 +9,10 @@ so every session in a table was treated the same way.
 
 Times: `t_s` is seconds from the start of typing (negative during the resting measurement); `utc` is
 filled when the session was synced to a server clock.
+
+The resting measurement of a session is the one timed with the stopwatch on the app's first screen
+(rest_<stamp>.json): the last that ended before the session started, at most an hour earlier. Sessions
+recorded when the task itself timed the rest carry it in their own events (baseline_start, baseline_end).
 """
 import csv
 import json
@@ -55,6 +59,38 @@ def phase_stats(breaths, shifting_share, seconds):
     }
 
 
+def track(radar_bin):
+    """One radar recording -> (breaths [{t ms on the recording's clock, period_s, depth_mm}], time of each track
+    sample, body-shifting mask, frames dropped)."""
+    rm = json.loads(radar_bin.with_suffix(".json").read_text(encoding="utf-8"))
+    n_bins = int(next(l for l in rm["config"] if l.startswith("profileCfg")).split()[10])
+    rec = np.fromfile(radar_bin, dtype=np.dtype([("t", "<f8"), ("fnum", "<u4"), ("iq", "<i2", (n_bins, N_ANT, 2))]))
+    fps = rm["frameHz"]
+    H = rec["iq"][..., 1] + 1j * rec["iq"][..., 0]  # frames as recorded: a dropped one shortens the track by 1/fps
+    wave, shifting, cut = follow(H, fps, rm["wavelengthM"] / (4 * np.pi) * 1e3, np.arange(n_bins) * rm["rangeResM"], 0.3, RMAX_M)
+    frame_t = rec["t"][1:]  # the track has one sample per frame step
+    breaths = [{"t": float(frame_t[min(end, len(frame_t) - 1)]), "period_s": period, "depth_mm": depth} for _, end, period, depth in cut]
+    return breaths, frame_t[: len(shifting)], shifting, int(rec["fnum"][-1] - rec["fnum"][0] + 1 - len(rec))
+
+
+def rest_before(folder, start_ms):
+    """The stopwatch-timed resting measurement that belongs to a session starting at `start_ms` (this PC's clock)
+    -> (its record, the radar recording made meanwhile), None where there is none."""
+    rests = [json.loads(f.read_text(encoding="utf-8")) for f in folder.glob("rest_*.json")]
+    mine = max((r for r in rests if 0 <= start_ms - r["t1"] <= 3600_000), key=lambda r: r["t1"], default=None)
+    if mine:
+        for b in folder.glob("radar_*.bin"):
+            if b.stat().st_size and not (folder / f"typing_{b.stem[len('radar_'):]}.json").exists():
+                step = 12 + int(next(l for l in json.loads(b.with_suffix(".json").read_text(encoding="utf-8"))["config"] if l.startswith("profileCfg")).split()[10]) * N_ANT * 4
+                with open(b, "rb") as fh:  # first and last frame time, without reading the recording
+                    first = np.frombuffer(fh.read(8), "<f8")[0]
+                    fh.seek(b.stat().st_size // step * step - step)
+                    last = np.frombuffer(fh.read(8), "<f8")[0]
+                if first <= mine["t0"] and mine["t1"] <= last + 2000:
+                    return mine, b
+    return mine, None
+
+
 def session(folder, sid):
     """-> (row for sessions.csv, rows for breaths.csv) of one typing session."""
     meta = json.loads((folder / f"typing_{sid}.json").read_text(encoding="utf-8"))
@@ -66,21 +102,22 @@ def session(folder, sid):
     utc = to_utc(meta.get("syncs") or [])
 
     breaths, moved, dropped = [], {}, ""
+    share = lambda t, shifting, a, b: float(shifting[(t >= a) & (t < b)].mean()) if a is not None and b is not None and ((t >= a) & (t < b)).any() else None
     radar_meta, radar_bin = folder / f"radar_{sid}.json", folder / f"radar_{sid}.bin"
+    offset = 0.0  # the typing page's clock minus this PC's clock
     if radar_bin.exists() and radar_bin.stat().st_size:
-        rm = json.loads(radar_meta.read_text(encoding="utf-8"))
-        n_bins = int(next(l for l in rm["config"] if l.startswith("profileCfg")).split()[10])
-        rec = np.fromfile(radar_bin, dtype=np.dtype([("t", "<f8"), ("fnum", "<u4"), ("iq", "<i2", (n_bins, N_ANT, 2))]))
-        fps = rm["frameHz"]
-        H = rec["iq"][..., 1] + 1j * rec["iq"][..., 0]  # frames as recorded: a dropped one shortens the track by 1/fps
-        dropped = int(rec["fnum"][-1] - rec["fnum"][0] + 1 - len(rec))
-        wave, shifting, cut = follow(H, fps, rm["wavelengthM"] / (4 * np.pi) * 1e3, np.arange(n_bins) * rm["rangeResM"], 0.3, RMAX_M)
-        frame_t = rec["t"][1:]  # the track has one sample per frame step; same clock as the typing events
-        for _, end, period, depth in cut:
-            breaths.append({"t": float(frame_t[min(end, len(frame_t) - 1)]), "period_s": period, "depth_mm": depth})
-        for name, (a, b) in {"rest": (rest0, rest1), "task": (task0, task1 or last_t)}.items():
-            inside = (frame_t[: len(shifting)] >= a) & (frame_t[: len(shifting)] < b) if a is not None and b is not None else np.zeros(0, bool)
-            moved[name] = float(shifting[inside].mean()) if inside.any() else None
+        offset = json.loads(radar_meta.read_text(encoding="utf-8")).get("clockOffsetMs") or 0.0
+        breaths, frame_t, shifting, dropped = track(radar_bin)  # same clock as the typing events
+        moved = {"rest": share(frame_t, shifting, rest0, rest1), "task": share(frame_t, shifting, task0, task1 or last_t)}
+    if rest0 is None and task0 is not None:  # the rest was timed with the stopwatch before the task was opened
+        timed, timed_bin = rest_before(folder, task0 - offset)
+        if timed:
+            rest0, rest1 = timed["t0"] + offset, timed["t1"] + offset  # onto the typing page's clock
+            rest_end = {"skipped": timed["seconds"] < timed["planned"]}
+        if timed_bin:
+            b, frame_t, shifting, _ = track(timed_bin)
+            breaths = [dict(x, t=x["t"] + offset) for x in b] + breaths
+            moved["rest"] = share(frame_t + offset, shifting, rest0, rest1)
 
     def phase_of(t):
         if rest0 is not None and rest1 is not None and rest0 <= t < rest1:

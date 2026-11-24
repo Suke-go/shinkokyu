@@ -330,10 +330,25 @@ fn save_typing(app: tauri::AppHandle, session: String, name: String, text: Strin
     Ok(dir.display().to_string())
 }
 
+/// Keeps a resting measurement timed with the stopwatch on the first screen: rest_<UTC stamp>.json, holding when the
+/// stopwatch ran (ms, this PC's clock: the clock of the radar recording made meanwhile) and what was counted.
+/// Returns the folder.
+#[tauri::command(async)]
+fn save_rest(app: tauri::AppHandle, text: String) -> Result<String, String> {
+    if text.len() > 1 << 16 || serde_json::from_str::<Value>(&text).is_err() {
+        return Err("invalid rest record".into());
+    }
+    let dir = app.path().document_dir().map_err(|e| e.to_string())?.join("shinkokyu-radar");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let stamp = utc_stamp(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs());
+    std::fs::write(dir.join(format!("rest_{stamp}.json")), text).map_err(|e| e.to_string())?;
+    Ok(dir.display().to_string())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
-        .invoke_handler(tauri::generate_handler![start, stop, save_typing])
+        .invoke_handler(tauri::generate_handler![start, stop, save_typing, save_rest])
         .build(tauri::generate_context!())
         .expect("failed to start")
         .run(|app, event| {
